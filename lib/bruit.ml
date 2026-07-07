@@ -140,14 +140,28 @@ let step1 ?g _Q (_Ei_pub, static, timestamp) (_Sr_priv, _Sr_pub) =
   let _Hr = mix _Hr empty in
   (Responder { _Hr; _Cr; _Er_priv }, (ephemeral, empty))
 
+let step2 _Q (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _Hi; _Ei_priv }) =
+  let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
+  let _Hi = mix _Hi _Er_pub in
+  let _Ci = kdf1 ~ck:_Ci ~ikm:(dh _Ei_priv _Er_pub) in
+  let _Ci = kdf1 ~ck:_Ci ~ikm:(dh _Si_priv _Er_pub) in
+  let _Ci, _t, _k = kdf3 ~ck:_Ci ~ikm:_Q in
+  let _Hi = mix _Hi _t in
+  let _ = decrypt _k empty _Hi in
+  let _Hi = mix _Hi empty in
+  Initiator { _Hi; _Ci; _Ei_priv }
+
 let run () =
   Mirage_crypto_rng_unix.use_default ();
   let now () = int_of_float (Unix.gettimeofday () *. 1e9) in
   let _Si = Mirage_crypto_ec.X25519.gen_key () in
   let _Sr = Mirage_crypto_ec.X25519.gen_key () in
   let _Q = String.make 32 '\000' in
-  let Initiator _, (ephemeral, static, timestamp) =
+  let initiator, (ephemeral, static, timestamp) =
     step0 ~now _Si (snd _Sr) in
-  let Responder _, (_ephemeral, _empty) =
+  let Responder { _Cr; _ }, (ephemeral, empty) =
     step1 _Q (ephemeral, static, timestamp) _Sr in
+  let Initiator { _Ci; _ } = step2 _Q (ephemeral, empty) _Si initiator in
+  Fmt.pr ">>> Ci: %s\n%!" (Ohex.encode _Ci);
+  Fmt.pr ">>> Cr: %s\n%!" (Ohex.encode _Cr);
   print_endline "Handshake: ok"
