@@ -1,13 +1,33 @@
+[@@@warning "-37"]
+
+let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
+let ( let* ) = Result.bind
+
+type error =
+  [ `Msg of string | Mirage_crypto_ec.error ]
+
+let pp_error ppf = function
+  | #Mirage_crypto_ec.error as err -> Mirage_crypto_ec.pp_error ppf err
+  | `Msg msg -> Fmt.string ppf msg
+
 type initiator = Initiator
 type responder = Responder
 
-type 'a sym =
+type 'a handshake =
   | Initiator : { _Hi : Digestif.BLAKE2S.t
     ; _Ci : string
-    ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> initiator sym
+    ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> initiator handshake
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
-    ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> responder sym
+    ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> responder handshake
+
+type psk = string
+
+let _Q = String.make 32 '\000'
+
+let psk str =
+  if String.length str <> 32 then invalid_arg "Bruit.psk: invalid private shared key";
+  str
 
 let mix hash str =
   let open Digestif in
@@ -44,9 +64,9 @@ let kdf3 ~ck ~ikm =
   (String.sub out 0 32, String.sub out 32 32, String.sub out 64 32)
 
 let dh priv pub =
-  Mirage_crypto_ec.X25519.key_exchange priv pub
-  |> Result.map_error (Fmt.str "%a" Mirage_crypto_ec.pp_error)
-  |> Result.error_to_failure
+  match Mirage_crypto_ec.X25519.key_exchange priv pub with
+  | Ok _ as value -> value
+  | Error (#Mirage_crypto_ec.error as err) -> Error err
 
 let aead _k ?(counter= 0L) txt _Hi =
   let nonce = if counter = 0L then String.make 12 '\000'
@@ -69,8 +89,8 @@ let decrypt _k ?(counter= 0L) txt _Hr =
   let key = Mirage_crypto.Chacha20.of_secret _k in
   let adata = Digestif.BLAKE2S.to_raw_string _Hr in
   match Mirage_crypto.Chacha20.authenticate_decrypt ~key ~nonce ~adata txt with
-  | Some plain -> plain
-  | None -> failwith "buit: AEAD authentication failed"
+  | Some plain -> Ok plain
+  | None -> error_msgf "AEAD authentication failed"
 
 let step0 ?g ~now (_Si_priv, _Si_pub) _Sr_pub =
   let open Digestif in
@@ -90,18 +110,20 @@ let step0 ?g ~now (_Si_priv, _Si_pub) _Sr_pub =
   (* Hi := Hash(Hi || msg.ephemeral) *)
   let _Hi = mix _Hi ephemeral in
   (* (Ci, k) := Kdf2(Ci, DH(Ei_priv, Sr_pub)) *)
-  let _Ci, _k = kdf2 ~ck:_Ci ~ikm:(dh _Ei_priv _Sr_pub) in
+  let* _ES = dh _Ei_priv _Sr_pub in
+  let _Ci, _k = kdf2 ~ck:_Ci ~ikm:_ES in
   (* msg.static := Aead(k, 0, Si_pub, Hi) *)
   let static = aead _k _Si_pub _Hi in
   (* Hi := Hash(Hi || msg.static) *)
   let _Hi = mix _Hi static in
   (* (Ci, k) := Kdf2(Ci, DH(Si_priv, Sr_pub) *)
-  let _Ci, _k = kdf2 ~ck:_Ci ~ikm:(dh _Si_priv _Sr_pub) in
+  let* _SS = dh _Si_priv _Sr_pub in
+  let _Ci, _k = kdf2 ~ck:_Ci ~ikm:_SS in
   (* msg.timestamp := Aead(k, 0, Timestamp(), Hi) *)
   let timestamp = aead _k (tai64n ~now) _Hi in
   (* Hi := Hash(Hi || msg.timestamp) *)
   let _Hi = mix _Hi timestamp in
-  (Initiator { _Hi; _Ci; _Ei_priv }, (ephemeral, static, timestamp))
+  Ok (Initiator { _Hi; _Ci; _Ei_priv }, (ephemeral, static, timestamp))
 
 let step1 ?g _Q (_Ei_pub, static, timestamp) (_Sr_priv, _Sr_pub) =
   let open Digestif in
@@ -112,11 +134,13 @@ let step1 ?g _Q (_Ei_pub, static, timestamp) (_Sr_priv, _Sr_pub) =
   (* *)
   let _Cr = kdf1 ~ck:_Cr ~ikm:_Ei_pub in
   let _Hr = mix _Hr _Ei_pub in
-  let _Cr, _k = kdf2 ~ck:_Cr ~ikm:(dh _Sr_priv _Ei_pub) in
-  let _Si_pub = decrypt _k static _Hr in
+  let* _SE = dh _Sr_priv _Ei_pub in
+  let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SE in
+  let* _Si_pub = decrypt _k static _Hr in
   let _Hr = mix _Hr static in
-  let _Cr, _k = kdf2 ~ck:_Cr ~ikm:(dh _Sr_priv _Si_pub) in
-  let _t = decrypt _k timestamp _Hr in
+  let* _SS = dh _Sr_priv _Si_pub in
+  let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SS in
+  let* _t = decrypt _k timestamp _Hr in
   let _Hr = mix _Hr timestamp in
   (* (Er_priv, Er_pub) := DH-Generate() *)
   let _Er_priv, _Er_pub = Mirage_crypto_ec.X25519.gen_key ?g () in
@@ -127,9 +151,11 @@ let step1 ?g _Q (_Ei_pub, static, timestamp) (_Sr_priv, _Sr_pub) =
   (* Hr := Hash(Hr || msg.ephemeral) *)
   let _Hr = mix _Hr ephemeral in
   (* Cr := kdf1(Cr, DH(Er_priv, Ei_pub)) *)
-  let _Cr = kdf1 ~ck:_Cr ~ikm:(dh _Er_priv _Ei_pub) in
+  let* _EE = dh _Er_priv _Ei_pub in
+  let _Cr = kdf1 ~ck:_Cr ~ikm:_EE in
   (* Cr := kdf1(Cr, DH(Er_priv, Si_pub)) *)
-  let _Cr = kdf1 ~ck:_Cr ~ikm:(dh _Er_priv _Si_pub) in
+  let* _ES = dh _Er_priv _Si_pub in
+  let _Cr = kdf1 ~ck:_Cr ~ikm:_ES  in
   (* (Cr, t, k) := Kdf3(Cr, Q) *)
   let _Cr, _t, _k = kdf3 ~ck:_Cr ~ikm:_Q in
   (* Hr := Hash(Hr || t) *)
@@ -138,18 +164,20 @@ let step1 ?g _Q (_Ei_pub, static, timestamp) (_Sr_priv, _Sr_pub) =
   let empty = aead _k "" _Hr in
   (* Hr := Hash(Hr || msg.empty) *)
   let _Hr = mix _Hr empty in
-  (Responder { _Hr; _Cr; _Er_priv }, (ephemeral, empty))
+  Ok (Responder { _Hr; _Cr; _Er_priv }, (ephemeral, empty))
 
 let step2 _Q (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _Hi; _Ei_priv }) =
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
   let _Hi = mix _Hi _Er_pub in
-  let _Ci = kdf1 ~ck:_Ci ~ikm:(dh _Ei_priv _Er_pub) in
-  let _Ci = kdf1 ~ck:_Ci ~ikm:(dh _Si_priv _Er_pub) in
+  let* _EE = dh _Ei_priv _Er_pub in
+  let _Ci = kdf1 ~ck:_Ci ~ikm:_EE in
+  let* _SE = dh _Si_priv _Er_pub in
+  let _Ci = kdf1 ~ck:_Ci ~ikm:_SE in
   let _Ci, _t, _k = kdf3 ~ck:_Ci ~ikm:_Q in
   let _Hi = mix _Hi _t in
-  let _ = decrypt _k empty _Hi in
+  let* _ = decrypt _k empty _Hi in
   let _Hi = mix _Hi empty in
-  Initiator { _Hi; _Ci; _Ei_priv }
+  Ok (Initiator { _Hi; _Ci; _Ei_priv })
 
 let run () =
   Mirage_crypto_rng_unix.use_default ();
@@ -157,11 +185,12 @@ let run () =
   let _Si = Mirage_crypto_ec.X25519.gen_key () in
   let _Sr = Mirage_crypto_ec.X25519.gen_key () in
   let _Q = String.make 32 '\000' in
-  let initiator, (ephemeral, static, timestamp) =
+  let* initiator, (ephemeral, static, timestamp) =
     step0 ~now _Si (snd _Sr) in
-  let Responder { _Cr; _ }, (ephemeral, empty) =
+  let* Responder { _Cr; _ }, (ephemeral, empty) =
     step1 _Q (ephemeral, static, timestamp) _Sr in
-  let Initiator { _Ci; _ } = step2 _Q (ephemeral, empty) _Si initiator in
-  Fmt.pr ">>> Ci: %s\n%!" (Ohex.encode _Ci);
-  Fmt.pr ">>> Cr: %s\n%!" (Ohex.encode _Cr);
-  print_endline "Handshake: ok"
+  let* Initiator { _Ci; _ } = step2 _Q (ephemeral, empty) _Si initiator in
+  (* (Ti_send == Tr_recv, Ti_recv == Tr_send) := Kdf2(Ci == Cr, ε) *)
+  let _T_send_i, _T_recv_i = kdf2 ~ck:_Ci ~ikm:"" in
+  let _T_recv_r, _T_send_r = kdf2 ~ck:_Cr ~ikm:"" in
+  Ok ()
