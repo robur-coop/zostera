@@ -1,0 +1,20 @@
+opam-version: "2.0"
+name:         "bruit"
+maintainer:   "Romain Calascibetta <romain.calascibetta@gmail.com>"
+authors:      "Romain Calascibetta <romain.calascibetta@gmail.com>"
+homepage:     "https://github.com/robur-coop/bruit"
+bug-reports:  "https://github.com/robur-coop/bruit/issues"
+dev-repo:     "git+https://github.com/robur-coop/bruit.git"
+doc:          "https://robur-coop.github.io/bruit/"
+license:      "AGPL"
+synopsis:     "WireGuard in OCaml"
+
+build: [ "dune" "build" "-p" name "-j" jobs ]
+run-test: [ "dune" "runtest" "-p" name "-j" jobs ] {os != "macos" & arch != "x86_32" & arch != "arm32"}
+
+depends: [
+  "ocaml"         {>= "4.08.0"}
+  "dune"          {>= "2.9.0"}
+]
+
+x-maintenance-intent: [ "(latest)" ]
