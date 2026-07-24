@@ -10,24 +10,45 @@ let pp_error ppf = function
   | #Mirage_crypto_ec.error as err -> Mirage_crypto_ec.pp_error ppf err
   | `Msg msg -> Fmt.string ppf msg
 
+type uid = int32
+
 type initiator = Initiator
 type responder = Responder
 
-type 'a handshake =
+type unverified = |
+type verified = |
+
+type ('a, 'state) handshake =
   | Initiator : { _Hi : Digestif.BLAKE2S.t
     ; _Ci : string
-    ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> initiator handshake
+    ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> (initiator, 'state) handshake
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
-    ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> responder handshake
+    ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, verified) handshake
 
 type psk = string
+type cookie = string
 
 let _Q = String.make 32 '\000'
 
 let psk str =
   if String.length str <> 32 then invalid_arg "Bruit.psk: invalid private shared key";
   str
+
+let cookie str =
+  if String.length str <> 16 then invalid_arg "Bruit.cookie: invalid cookie";
+  str
+
+type secret = Mirage_crypto_ec.X25519.secret
+type public = string * string
+
+let gen ?g () : secret * public =
+  let secret, public = Mirage_crypto_ec.X25519.gen_key ?g () in
+  let open Digestif in
+  let ctx = BLAKE2S.hmac_init ~key:"mac1----" in
+  let ctx = BLAKE2S.hmac_feed_string ctx public in
+  let _K = BLAKE2S.hmac_get ctx |> BLAKE2S.to_raw_string in
+  (secret, (public, _K))
 
 let mix hash str =
   let open Digestif in
@@ -92,7 +113,23 @@ let decrypt _k ?(counter= 0L) txt _Hr =
   | Some plain -> Ok plain
   | None -> error_msgf "AEAD authentication failed"
 
-let step0 ?g ~now (_Si_priv, _Si_pub) _Sr_pub =
+let empty = String.make 16 '\x00'
+
+let mac2 ?(off= 0) pkt = function
+  | None -> Bytes.blit_string empty 0 pkt off 16
+  | Some cookie ->
+    let open Digestif in
+    let _K = BLAKE2S.hmac_init ~key:"cookie--" in
+    let _K = BLAKE2S.hmac_feed_string _K cookie in
+    let _K = BLAKE2S.hmac_get _K |> BLAKE2S.to_raw_string in
+    let ctx = BLAKE2S.hmac_init ~key:_K in
+    let ctx = BLAKE2S.hmac_feed_bytes ctx pkt ~off:0 ~len:off in
+    let mac2 = BLAKE2S.hmac_get ctx |> BLAKE2S.to_raw_string in
+    Bytes.blit_string mac2 0 pkt off 16
+
+type msg1 = string * string * string
+
+let step0 ?g ~now (_Si_priv, (_Si_pub, _)) (_Sr_pub, _) =
   let open Digestif in
   (* Ci := Hash(Construction) *)
   let _Ci = BLAKE2S.digest_string "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s" in
@@ -125,7 +162,24 @@ let step0 ?g ~now (_Si_priv, _Si_pub) _Sr_pub =
   let _Hi = mix _Hi timestamp in
   Ok (Initiator { _Hi; _Ci; _Ei_priv }, (ephemeral, static, timestamp))
 
-let step1 ?g _Q (_Ei_pub, static, timestamp) (_Sr_priv, _Sr_pub) =
+let pkt_of_initiator (Initiator _) uid (_, _Kr) ?cookie (ephemeral, static, timestamp) =
+  let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
+  Bytes.set_uint8 pkt 0 1;
+  Bytes.set_int32_be pkt 4 uid;
+  Bytes.blit_string ephemeral 0 pkt 8 32;
+  Bytes.blit_string static 0 pkt 40 48;
+  Bytes.blit_string timestamp 0 pkt 88 28;
+  let open Digestif in
+  let mac1 = BLAKE2S.hmac_init ~key:_Kr in
+  let mac1 = BLAKE2S.hmac_feed_bytes mac1 pkt ~off:0 ~len:116 in
+  let mac1 = BLAKE2S.hmac_get mac1 |> BLAKE2S.to_raw_string in
+  Bytes.blit_string mac1 0 pkt 116 16;
+  mac2 ~off:132 pkt cookie;
+  Bytes.unsafe_to_string pkt
+
+type msg2 = string * string
+
+let step1 ?g ?psk:(_Q= _Q) (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   let open Digestif in
   let _Cr = BLAKE2S.digest_string "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s" in
   let _Hr = mix _Cr "WireGuard v1 zx2c4 Jason@zx2c4.com" in
@@ -166,7 +220,24 @@ let step1 ?g _Q (_Ei_pub, static, timestamp) (_Sr_priv, _Sr_pub) =
   let _Hr = mix _Hr empty in
   Ok (Responder { _Hr; _Cr; _Er_priv }, (ephemeral, empty))
 
-let step2 _Q (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _Hi; _Ei_priv }) =
+let pkt_of_responder
+  : type a. (responder, a) handshake -> uid -> uid -> public -> ?cookie:cookie -> msg2 -> string
+  = fun (Responder _) uid0 uid1 (_, _Ki) ?cookie (ephemeral, empty) ->
+  let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
+  Bytes.set_uint8 pkt 0 2;
+  Bytes.set_int32_be pkt 4 uid0;
+  Bytes.set_int32_be pkt 8 uid1;
+  Bytes.blit_string ephemeral 0 pkt 12 32;
+  Bytes.blit_string empty 0 pkt 44 16;
+  let open Digestif in
+  let mac1 = BLAKE2S.hmac_init ~key:_Ki in
+  let mac1 = BLAKE2S.hmac_feed_bytes mac1 pkt ~off:0 ~len:60 in
+  let mac1 = BLAKE2S.hmac_get mac1 |> BLAKE2S.to_raw_string in
+  Bytes.blit_string mac1 0 pkt 60 16;
+  mac2 ~off:76 pkt cookie;
+  Bytes.unsafe_to_string pkt
+
+let step2 ?psk:(_Q= _Q) (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _Hi; _Ei_priv }) =
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
   let _Hi = mix _Hi _Er_pub in
   let* _EE = dh _Ei_priv _Er_pub in
@@ -179,11 +250,21 @@ let step2 _Q (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _Hi; _Ei_pri
   let _Hi = mix _Hi empty in
   Ok (Initiator { _Hi; _Ci; _Ei_priv })
 
+let keys : type a. (a, verified) handshake -> string * string = function
+  | Initiator { _Ci; _ } -> kdf2 ~ck:_Ci ~ikm:""
+  | Responder { _Cr; _ } -> kdf2 ~ck:_Cr ~ikm:""
+
+(*
 let run () =
   Mirage_crypto_rng_unix.use_default ();
   let now () = int_of_float (Unix.gettimeofday () *. 1e9) in
   let _Si = Mirage_crypto_ec.X25519.gen_key () in
   let _Sr = Mirage_crypto_ec.X25519.gen_key () in
+  let _Kr =
+    let open Digestif in
+    let ctx = BLAKE2S.hmac_init ~key:"mac1----" in
+    let ctx = BLAKE2S.hmac_feed_string ctx (snd _Sr) in
+    BLAKE2S.hmac_get ctx |> BLAKE2S.to_raw_string in
   let _Q = String.make 32 '\000' in
   let* initiator, (ephemeral, static, timestamp) =
     step0 ~now _Si (snd _Sr) in
@@ -194,3 +275,4 @@ let run () =
   let _T_send_i, _T_recv_i = kdf2 ~ck:_Ci ~ikm:"" in
   let _T_recv_r, _T_send_r = kdf2 ~ck:_Cr ~ikm:"" in
   Ok ()
+*)
