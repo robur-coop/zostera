@@ -33,6 +33,14 @@ val step0 :
   -> public
   -> ((initiator, unverified) handshake * msg1, [> error ]) result
 
+val pkt_of_initiator :
+     (initiator, unverified) handshake
+  -> uid
+  -> public
+  -> ?cookie:cookie
+  -> msg1
+  -> string
+
 type msg2
 
 val step1 :
@@ -42,21 +50,6 @@ val step1 :
   -> (secret * public)
   -> ((responder, verified) handshake * msg2, [> error ]) result
 
-val step2 :
-     ?psk:psk
-  -> msg2
-  -> (secret * public)
-  -> (initiator, 'a) handshake
-  -> ((initiator, verified) handshake, [> error ]) result
-
-val pkt_of_initiator :
-     (initiator, unverified) handshake
-  -> uid
-  -> public
-  -> ?cookie:cookie
-  -> msg1
-  -> string
-
 val pkt_of_responder :
      (responder, 'a) handshake
   -> uid
@@ -65,5 +58,12 @@ val pkt_of_responder :
   -> ?cookie:cookie
   -> msg2
   -> string
+
+val step2 :
+     ?psk:psk
+  -> msg2
+  -> (secret * public)
+  -> (initiator, 'a) handshake
+  -> ((initiator, verified) handshake, [> error ]) result
 
 val keys : ('a, verified) handshake -> string * string
