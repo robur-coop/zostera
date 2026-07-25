@@ -1,5 +1,11 @@
 type uid = private int32
 
+module Uid : sig
+  type t = uid
+
+  val unsafe_of_int32 : int32 -> t
+end
+
 type initiator
 type responder
 
@@ -41,6 +47,12 @@ val pkt_of_initiator :
   -> msg1
   -> string
 
+val msg1_of_string :
+     ?cookie:cookie
+  -> public
+  -> string
+  -> (uid * msg1, [> `Msg of string ]) result
+
 type msg2
 
 val step1 :
@@ -58,6 +70,12 @@ val pkt_of_responder :
   -> ?cookie:cookie
   -> msg2
   -> string
+
+val msg2_of_string :
+     ?cookie:cookie
+  -> public
+  -> string
+  -> (uid * uid * msg2, [> `Msg of string ]) result
 
 val step2 :
      ?psk:psk

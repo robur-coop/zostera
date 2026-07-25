@@ -1,6 +1,8 @@
 [@@@warning "-37"]
 
 let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
+let msgf fmt = Fmt.kstr (fun msg -> `Msg msg) fmt
+let guard ~err fn = if fn () then Ok () else Error err
 let ( let* ) = Result.bind
 
 type error =
@@ -11,6 +13,12 @@ let pp_error ppf = function
   | `Msg msg -> Fmt.string ppf msg
 
 type uid = int32
+
+module Uid = struct
+  type t = uid
+
+  let unsafe_of_int32 x = x
+end
 
 type initiator = Initiator
 type responder = Responder
@@ -115,17 +123,29 @@ let decrypt _k ?(counter= 0L) txt _Hr =
 
 let empty = String.make 16 '\x00'
 
+let _K_cookie cookie =
+  let open Digestif in
+  let _K = BLAKE2S.hmac_init ~key:"cookie--" in
+  let _K = BLAKE2S.hmac_feed_string _K cookie in
+  BLAKE2S.hmac_get _K |> BLAKE2S.to_raw_string
+
 let mac2 ?(off= 0) pkt = function
   | None -> Bytes.blit_string empty 0 pkt off 16
   | Some cookie ->
     let open Digestif in
-    let _K = BLAKE2S.hmac_init ~key:"cookie--" in
-    let _K = BLAKE2S.hmac_feed_string _K cookie in
-    let _K = BLAKE2S.hmac_get _K |> BLAKE2S.to_raw_string in
-    let ctx = BLAKE2S.hmac_init ~key:_K in
+    let ctx = BLAKE2S.hmac_init ~key:(_K_cookie cookie) in
     let ctx = BLAKE2S.hmac_feed_bytes ctx pkt ~off:0 ~len:off in
     let mac2 = BLAKE2S.hmac_get ctx |> BLAKE2S.to_raw_string in
     Bytes.blit_string mac2 0 pkt off 16
+
+let verify_mac2 ?(off= 0) str = function
+  | None -> String.sub str off 16 = empty
+  | Some cookie ->
+    let open Digestif in
+    let ctx = BLAKE2S.hmac_init ~key:(_K_cookie cookie) in
+    let ctx = BLAKE2S.hmac_feed_string ctx str ~off:0 ~len:off in
+    let mac2 = BLAKE2S.hmac_get ctx |> BLAKE2S.to_raw_string in
+    Eqaf.equal (String.sub str off 16) (String.sub mac2 0 16)
 
 type msg1 = string * string * string
 
@@ -176,6 +196,25 @@ let pkt_of_initiator (Initiator _) uid (_, _Kr) ?cookie (ephemeral, static, time
   Bytes.blit_string mac1 0 pkt 116 16;
   mac2 ~off:132 pkt cookie;
   Bytes.unsafe_to_string pkt
+
+let msg1_of_string ?cookie (_, _Kr) str =
+  let* () = guard ~err:(msgf "Truncated msg1 packet") @@ fun () ->
+    String.length str >= 148 in
+  let* () = guard ~err:(msgf "Invalid msg1 packet") @@ fun () ->
+    str.[0] = '\x01' in
+  let uid = String.get_int32_be str 4 in
+  let ephemeral = String.sub str 8 32 in
+  let static = String.sub str 40 48 in
+  let timestamp = String.sub str 88 28 in
+  let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
+    let open Digestif in
+    let mac1 = BLAKE2S.hmac_init ~key:_Kr in
+    let mac1 = BLAKE2S.hmac_feed_string mac1 str ~off:0 ~len:116 in
+    let mac1 = BLAKE2S.hmac_get mac1 |> BLAKE2S.to_raw_string in
+    Eqaf.equal (String.sub str 116 16) (String.sub mac1 0 16) in
+  let* () = guard ~err:(msgf "Invalid MAC2") @@ fun () ->
+    verify_mac2 ~off:132 str cookie in
+  Ok (uid, (ephemeral, static, timestamp))
 
 type msg2 = string * string
 
@@ -236,6 +275,25 @@ let pkt_of_responder
   Bytes.blit_string mac1 0 pkt 60 16;
   mac2 ~off:76 pkt cookie;
   Bytes.unsafe_to_string pkt
+
+let msg2_of_string ?cookie (_, _Ki) str =
+  let* () = guard ~err:(msgf "Truncated msg2 packet") @@ fun () ->
+    String.length str >= 92 in
+  let* () = guard ~err:(msgf "Invalid msg2 packet") @@ fun () ->
+    str.[0] = '\x02' in
+  let uid0 = String.get_int32_be str 4 in
+  let uid1 = String.get_int32_be str 8 in
+  let ephemeral = String.sub str 12 32 in
+  let empty = String.sub str 44 16 in
+  let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
+    let open Digestif in
+    let mac1 = BLAKE2S.hmac_init ~key:_Ki in
+    let mac1 = BLAKE2S.hmac_feed_string mac1 str ~off:0 ~len:60 in
+    let mac1 = BLAKE2S.hmac_get mac1 |> BLAKE2S.to_raw_string in
+    Eqaf.equal (String.sub str 60 16) (String.sub mac1 0 16) in
+  let* () = guard ~err:(msgf "Invalid MAC2") @@ fun () ->
+    verify_mac2 ~off:76 str cookie in
+  Ok (uid0, uid1, (ephemeral, empty))
 
 let step2 ?psk:(_Q= _Q) (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _Hi; _Ei_priv }) =
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
