@@ -5,25 +5,36 @@ let peer0 =
   let* ipaddr, port = Ipaddr.with_port_of_string ~default:1234 "1.2.3.4:5678" in
   Ok (Zostera.addr ipaddr ~port)
 
+let peer1 =
+  let* ipaddr, port = Ipaddr.with_port_of_string ~default:1234 "4.3.2.1:5678" in
+  Ok (Zostera.addr ipaddr ~port)
+
 let peer0 = Result.get_ok peer0
+let peer1 = Result.get_ok peer1
 
 let run () =
   Mirage_crypto_rng_unix.use_default ();
   let now () = int_of_float (Unix.gettimeofday () *. 1e9) in
   let i = Zostera.gen () in
   let r = Zostera.gen () in
-  let limiter = Zostera.limiter () in
-  let checker = Zostera.checker ~me:r () in
+  let limiter_i = Zostera.limiter () in
+  let limiter_r = Zostera.limiter () in
+  let checker_i = Zostera.checker ~me:i () in
+  let checker_r = Zostera.checker ~me:r () in
   let* init0, msg1 = Zostera.step0 ~now i (Zostera.public r) in
   let _mac1, pkt1 = Zostera.pkt_of_initiator init0 (Zostera.public r) msg1 in
   let* (_0, msg1) =
-    match Zostera.msg1_of_string checker limiter ~now ~load:false ~peer:peer0 pkt1 with
+    match Zostera.msg1_of_string checker_r limiter_i ~now ~load:false ~peer:peer0 pkt1 with
     | Ok `Cookie _ -> error_msgf "We would like to emit cookie"
     | Ok (`Msg1 (uid, msg1)) -> Ok (uid, msg1)
     | Error _ as err -> err in
   let* responder, msg2 = Zostera.step1 msg1 r in
   let _mac1, pkt = Zostera.pkt_of_responder responder _0 (Zostera.public i) msg2 in
-  let* link, msg2 = Zostera.msg2_of_string (Zostera.public i) pkt in
+  let* link, msg2 =
+    match Zostera.msg2_of_string checker_i limiter_r ~now ~load:false ~peer:peer1 pkt with
+    | Ok `Cookie _ -> error_msgf "We would like to emit cookie"
+    | Ok (`Msg2 (link, msg2)) -> Ok (link, msg2)
+    | Error _ as err -> err in
   let* session0 = Zostera.step2 ~now link msg2 i init0 in
   let { Zostera.send= _Ai; recv= _Bi } = Zostera.keys session0 in
   let { Zostera.recv= _Ar; send= _Br } =

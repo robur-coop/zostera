@@ -97,10 +97,14 @@ val pkt_of_responder :
 type link
 
 val msg2_of_string :
-     ?cookie:cookie
-  -> public
+     ?g:Mirage_crypto_rng.g
+  -> checker
+  -> limiter
+  -> now:(unit -> int)
+  -> load:bool
+  -> peer:addr
   -> string
-  -> (link * msg2, [> `Msg of string ]) result
+  -> ([ `Msg2 of link * msg2 | `Cookie of string ], [> `Msg of string ]) result
 
 type session
 

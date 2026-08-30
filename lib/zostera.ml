@@ -388,22 +388,24 @@ let cookie ?g (checker : checker) ~tau str =
   Bytes.blit_string s 0 pkt 32 32;
   Bytes.unsafe_to_string pkt
 
+let defend ?g checker limiter ~now ~load ~peer ~off pkt =
+  let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
+    verify_mac ~key:checker.mac1_key ~off pkt in
+  if not load then Ok `Ok
+  else
+    let tau = tau checker ~now peer in
+    if not (verify_mac ~key:tau ~off:(off + 16) pkt)
+    then Ok (`Cookie (cookie ?g checker ~tau pkt))
+    else if not (Limiter.allow limiter ~now peer)
+    then error_msgf "Too many retries"
+    else Ok `Ok
+
 let msg1_of_string ?g checker limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg1 packet") @@ fun () ->
     String.length pkt = 148 in
   let* () = guard ~err:(msgf "Invalid msg1 packet") @@ fun () ->
     String.get_uint8 pkt 0 = 1 in
-  let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
-    verify_mac ~key:checker.mac1_key ~off:116 pkt in
-  let* continue =
-    if not load then Ok `Ok
-    else
-      let tau = tau checker ~now peer in
-      if not (verify_mac ~key:tau ~off:132 pkt)
-      then Ok (`Cookie (cookie ?g checker ~tau pkt))
-      else if not (Limiter.allow limiter ~now peer)
-      then error_msgf "Too many retries"
-      else Ok `Ok in
+  let* continue = defend ?g checker limiter ~now ~load ~peer ~off:116 pkt in
   match continue with
   | `Cookie _ as cookie -> Ok cookie
   | `Ok ->
@@ -471,24 +473,22 @@ let pkt_of_responder
   mac2 ~off:76 pkt cookie;
   (mac1, Bytes.unsafe_to_string pkt)
 
-type link = uid * uid
+type link = { sender : uid; receiver : uid }
 
-let msg2_of_string ?cookie (_, _Ki) str =
+let msg2_of_string ?g checker limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg2 packet") @@ fun () ->
-    String.length str = 92 in
+    String.length pkt = 92 in
   let* () = guard ~err:(msgf "Invalid msg2 packet") @@ fun () ->
-    str.[0] = '\x02' in
-  let uid0 = String.get_int32_le str 4 in
-  let uid1 = String.get_int32_le str 8 in
-  let ephemeral = String.sub str 12 32 in
-  let empty = String.sub str 44 16 in
-  let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
-    verify_mac ~key:_Ki ~off:60 str in
-  let* () = guard ~err:(msgf "Invalid MAC2") @@ fun () ->
-    match cookie with
-    | None -> true
-    | Some cookie -> verify_mac ~key:cookie ~off:76 str in
-  Ok ((uid0, uid1), (ephemeral, empty))
+    pkt.[0] = '\x02' in
+  let* continue = defend ?g checker limiter ~now ~load ~peer ~off:60 pkt in
+  match continue with
+  | `Cookie _ as cookie -> Ok cookie
+  | `Ok ->
+    let uid0 = String.get_int32_le pkt 4 in
+    let uid1 = String.get_int32_le pkt 8 in
+    let ephemeral = String.sub pkt 12 32 in
+    let empty = String.sub pkt 44 16 in
+    Ok (`Msg2 ({ sender= uid1; receiver= uid0 }, (ephemeral, empty)))
 
 type role =
   | Initiator
@@ -523,10 +523,10 @@ let session ~now ~role ~local ~remote _C =
   { local; remote; keys; birth= now ()
   ; role; counter= 0L; window= Window.make (); confirmed= (role = Initiator) }
 
-let step2 ?psk:(_Q= _Q) ~now (uid1, uid0) (_Er_pub, empty) (_Si_priv, _Si_pub)
+let step2 ?psk:(_Q= _Q) ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _Si_pub)
   (Initiator { _Ci; _Hi; uid; _Ei_priv } : (initiator, _) handshake) =
   let* () = guard ~err:(msgf "Unexpected receiver UID") @@ fun () ->
-    uid0 = uid in
+    sender = uid in
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
   let _Hi = mix _Hi _Er_pub in
   let* _EE = dh _Ei_priv _Er_pub in
@@ -537,7 +537,7 @@ let step2 ?psk:(_Q= _Q) ~now (uid1, uid0) (_Er_pub, empty) (_Si_priv, _Si_pub)
   let _Hi = mix _Hi _t in
   let* _ = decrypt _k empty _Hi in
   (* let _Hi = mix _Hi empty in *)
-  Ok (session ~now ~role:Initiator ~local:uid0 ~remote:uid1 _Ci)
+  Ok (session ~now ~role:Initiator ~local:sender ~remote:receiver _Ci)
 
 let session_of_responder ~now remote
   (Responder { _Cr; uid; _ } : (responder, _) handshake) =
