@@ -16,6 +16,10 @@ type limiter
 
 val limiter : unit -> limiter
 
+type timestamp
+
+val newer : timestamp -> timestamp -> bool
+
 type initiator
 type responder
 
@@ -37,6 +41,7 @@ type public
 
 val gen : ?g:Mirage_crypto_rng.g -> unit -> t
 val public_of_octets : string -> public
+val octets_of_public : public -> string
 val public : t -> public
 
 type checker
@@ -81,7 +86,7 @@ type msg2
 
 val step1 :
      ?g:Mirage_crypto_rng.g
-  -> ?psk:psk
+  -> peer:(public -> timestamp -> [ `Accept of psk option | `Reject ])
   -> msg1
   -> t
   -> ((responder, verified) handshake * msg2, [> error ]) result

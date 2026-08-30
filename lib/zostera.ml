@@ -250,12 +250,16 @@ let public_of_octets str =
   let _K = BLAKE2S.to_raw_string _K in
   (str, _K)
 
+let octets_of_public (_S_pub, _) = _S_pub
+
 let mix hash str =
   let open Digestif in
   let ctx = BLAKE2S.empty in
   let ctx = BLAKE2S.feed_string ctx (BLAKE2S.to_raw_string hash) in
   let ctx = BLAKE2S.feed_string ctx str in
   BLAKE2S.get ctx
+
+type timestamp = string
 
 let tai64n ~now =
   let nsecs = Int64.of_int (now ()) in
@@ -267,6 +271,8 @@ let tai64n ~now =
   Bytes.set_int64_be buf 0 secs;
   Bytes.set_int32_be buf 8 tai;
   Bytes.unsafe_to_string buf
+
+let newer a b = Eqaf.compare_be a b > 0
 
 module Kdf = Hkdf.Make (Digestif.BLAKE2S)
 
@@ -417,7 +423,7 @@ let msg1_of_string ?g checker limiter ~now ~load ~peer pkt =
 
 type msg2 = string * string
 
-let step1 ?g ?psk:(_Q= _Q) (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
+let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   let open Digestif in
   let _Cr = BLAKE2S.digest_string "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s" in
   let _Hr = mix _Cr "WireGuard v1 zx2c4 Jason@zx2c4.com" in
@@ -434,6 +440,10 @@ let step1 ?g ?psk:(_Q= _Q) (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _))
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SS in
   let* _t = decrypt _k timestamp _Hr in
   let _Hr = mix _Hr timestamp in
+  let* _Q = match peer (public_of_octets _Si_pub) _t with
+    | `Accept (Some psk) -> Ok psk
+    | `Accept None -> Ok _Q
+    | `Reject -> error_msgf "Unknown or replayed peer" in
   (* (Er_priv, Er_pub) := DH-Generate() *)
   let _Er_priv, _Er_pub = Mirage_crypto_ec.X25519.gen_key ?g () in
   (* Cr := Kdf1(Cr, Er_pub) *)
@@ -488,7 +498,7 @@ let msg2_of_string ?g checker limiter ~now ~load ~peer pkt =
     let uid1 = String.get_int32_le pkt 8 in
     let ephemeral = String.sub pkt 12 32 in
     let empty = String.sub pkt 44 16 in
-    Ok (`Msg2 ({ sender= uid1; receiver= uid0 }, (ephemeral, empty)))
+    Ok (`Msg2 ({ sender= uid0; receiver= uid1 }, (ephemeral, empty)))
 
 type role =
   | Initiator
@@ -526,7 +536,7 @@ let session ~now ~role ~local ~remote _C =
 let step2 ?psk:(_Q= _Q) ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _Si_pub)
   (Initiator { _Ci; _Hi; uid; _Ei_priv } : (initiator, _) handshake) =
   let* () = guard ~err:(msgf "Unexpected receiver UID") @@ fun () ->
-    sender = uid in
+    receiver = uid in
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
   let _Hi = mix _Hi _Er_pub in
   let* _EE = dh _Ei_priv _Er_pub in
