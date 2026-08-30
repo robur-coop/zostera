@@ -38,7 +38,7 @@ let hchacha20 ~key ~nonce =
   done;
   let buf = Bytes.create 32 in
   for i = 0 to 3 do Bytes.set_int32_le buf (i*4) s.(i) done;
-  for i = 0 to 3 do Bytes.set_int32_be buf (16+i*4) s.(12+i) done;
+  for i = 0 to 3 do Bytes.set_int32_le buf (16+i*4) s.(12+i) done;
   Bytes.unsafe_to_string buf
 
 let xaead ~key ~nonce ?adata msg =
@@ -127,6 +127,8 @@ end
 let _mac ~key ?(off= 0) ?len buf =
   if String.length key > 32 then invalid_arg "Bruit._mac: invalid key";
   let len = match len with Some len -> len | None -> String.length buf - off in
+  if off < 0 || len < 0 || off + len > String.length buf
+  then invalid_arg "Bruit._mac: out of bounds";
   let ctx = Bytes.create (B2s.ctx_size ()) in
   B2s.with_outlen_and_key ctx 16 key 0 (String.length key);
   B2s.update ctx buf off len;
@@ -194,9 +196,11 @@ type verified = |
 type ('a, 'state) handshake =
   | Initiator : { _Hi : Digestif.BLAKE2S.t
     ; _Ci : string
+    ; uid : uid
     ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> (initiator, 'state) handshake
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
+    ; uid : uid
     ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, verified) handshake
 
 type psk = string
@@ -208,14 +212,23 @@ let psk str =
   if String.length str <> 32 then invalid_arg "Bruit.psk: invalid private shared key";
   str
 
-let cookie_of_pkt checker ~mac1 pkt =
+let cookie_of_pkt validator ~now ~uid ~mac1 pkt =
   if String.length pkt <> 64
   || String.get_uint8 pkt 0 <> 3
-  then None
+  || String.get_int32_le pkt 4 <> uid
+  then false
   else
     let nonce = String.sub pkt 8 24 in
     let s = String.sub pkt 32 32 in
-    xaead_open ~key:checker.cookie_key ~nonce ~adata:mac1 s
+    match xaead_open ~key:validator.cookie_key ~nonce ~adata:mac1 s with
+    | Some cookie -> validator.cookie <- Some (cookie, now()); true
+    | None -> false
+
+let cookie_of_validator validator ~now =
+  match validator.cookie with
+  | Some (cookie, birth) when now () - birth <= _COOKIE_LIFETIME -> Some cookie
+  | Some _ -> validator.cookie <- None; None
+  | None -> None
 
 type secret = Mirage_crypto_ec.X25519.secret
 type public = string * string
@@ -302,12 +315,6 @@ let decrypt _k ?(counter= 0L) txt _Hr =
 
 let empty = String.make 16 '\x00'
 
-let _K_cookie cookie =
-  let open Digestif in
-  let _K = BLAKE2S.hmac_init ~key:"cookie--" in
-  let _K = BLAKE2S.hmac_feed_string _K cookie in
-  BLAKE2S.hmac_get _K |> BLAKE2S.to_raw_string
-
 let mac2 ?(off= 0) pkt = function
   | None -> Bytes.blit_string empty 0 pkt off 16
   | Some cookie ->
@@ -347,9 +354,10 @@ let step0 ?g ~now (_Si_priv, (_Si_pub, _)) (_Sr_pub, _) =
   let timestamp = aead _k (tai64n ~now) _Hi in
   (* Hi := Hash(Hi || msg.timestamp) *)
   let _Hi = mix _Hi timestamp in
-  Ok (Initiator { _Hi; _Ci; _Ei_priv }, (ephemeral, static, timestamp))
+  let uid = uid ?g () in
+  Ok (Initiator { _Hi; _Ci; uid; _Ei_priv }, (ephemeral, static, timestamp))
 
-let pkt_of_initiator (Initiator _) uid (_, _Kr) ?cookie (ephemeral, static, timestamp) =
+let pkt_of_initiator (Initiator { uid; _ }) (_, _Kr) ?cookie (ephemeral, static, timestamp) =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 1;
   Bytes.set_int32_le pkt 4 uid;
@@ -446,11 +454,12 @@ let step1 ?g ?psk:(_Q= _Q) (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _))
   let empty = aead _k "" _Hr in
   (* Hr := Hash(Hr || msg.empty) *)
   let _Hr = mix _Hr empty in
-  Ok (Responder { _Hr; _Cr; _Er_priv }, (ephemeral, empty))
+  let uid = uid ?g () in
+Ok (Responder { _Hr; _Cr; uid; _Er_priv }, (ephemeral, empty))
 
 let pkt_of_responder
-  : type a. (responder, a) handshake -> uid -> uid -> public -> ?cookie:cookie -> msg2 -> string
-  = fun (Responder _) uid0 uid1 (_, _Ki) ?cookie (ephemeral, empty) ->
+  : type a. (responder, a) handshake -> uid -> public -> ?cookie:cookie -> msg2 -> mac1 * string
+  = fun (Responder { uid= uid0; _ }) uid1 (_, _Ki) ?cookie (ephemeral, empty) ->
   let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 2;
   Bytes.set_int32_le pkt 4 uid0;
@@ -460,11 +469,13 @@ let pkt_of_responder
   let mac1 = _mac ~key:_Ki (Bytes.unsafe_to_string pkt) ~off:0 ~len:60 in
   Bytes.blit_string mac1 0 pkt 60 16;
   mac2 ~off:76 pkt cookie;
-  Bytes.unsafe_to_string pkt
+  (mac1, Bytes.unsafe_to_string pkt)
+
+type link = uid * uid
 
 let msg2_of_string ?cookie (_, _Ki) str =
   let* () = guard ~err:(msgf "Truncated msg2 packet") @@ fun () ->
-    String.length str >= 92 in
+    String.length str = 92 in
   let* () = guard ~err:(msgf "Invalid msg2 packet") @@ fun () ->
     str.[0] = '\x02' in
   let uid0 = String.get_int32_le str 4 in
@@ -476,10 +487,46 @@ let msg2_of_string ?cookie (_, _Ki) str =
   let* () = guard ~err:(msgf "Invalid MAC2") @@ fun () ->
     match cookie with
     | None -> true
-    | Some cookie -> verify_mac ~key:cookie ~off:96 str in
-  Ok (uid0, uid1, (ephemeral, empty))
+    | Some cookie -> verify_mac ~key:cookie ~off:76 str in
+  Ok ((uid0, uid1), (ephemeral, empty))
 
-let step2 ?psk:(_Q= _Q) (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _Hi; _Ei_priv }) =
+type role =
+  | Initiator
+  | Responder
+
+type keys = { send : string; recv : string }
+
+module Window = struct
+  type t = { mutable last : int64; bits : bytes }
+
+  let _BITS = 8192
+  let _WORDS = _BITS / 64
+  let make () = { last= 0L; bits= Bytes.make (_WORDS * 8) '\000' }
+end
+
+type window = Window.t
+
+type session =
+  { local : uid
+  ; remote : uid
+  ; keys : keys
+  ; birth : int
+  ; role : role
+  ; mutable counter : int64
+  ; window : window
+  ; mutable confirmed : bool }
+
+let session ~now ~role ~local ~remote _C =
+  let keys = match role with
+    | Initiator -> let send, recv = kdf2 ~ck:_C ~ikm:"" in { send; recv }
+    | Responder -> let recv, send = kdf2 ~ck:_C ~ikm:"" in { send; recv } in
+  { local; remote; keys; birth= now ()
+  ; role; counter= 0L; window= Window.make (); confirmed= (role = Initiator) }
+
+let step2 ?psk:(_Q= _Q) ~now (uid1, uid0) (_Er_pub, empty) (_Si_priv, _Si_pub)
+  (Initiator { _Ci; _Hi; uid; _Ei_priv } : (initiator, _) handshake) =
+  let* () = guard ~err:(msgf "Unexpected receiver UID") @@ fun () ->
+    uid0 = uid in
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
   let _Hi = mix _Hi _Er_pub in
   let* _EE = dh _Ei_priv _Er_pub in
@@ -489,18 +536,14 @@ let step2 ?psk:(_Q= _Q) (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _
   let _Ci, _t, _k = kdf3 ~ck:_Ci ~ikm:_Q in
   let _Hi = mix _Hi _t in
   let* _ = decrypt _k empty _Hi in
-  let _Hi = mix _Hi empty in
-  Ok (Initiator { _Hi; _Ci; _Ei_priv })
+  (* let _Hi = mix _Hi empty in *)
+  Ok (session ~now ~role:Initiator ~local:uid0 ~remote:uid1 _Ci)
 
-type keys = { send : string; recv : string }
+let session_of_responder ~now remote
+  (Responder { _Cr; uid; _ } : (responder, _) handshake) =
+  session ~now ~role:Responder ~local:uid ~remote _Cr
 
-let keys : type a. (a, verified) handshake -> keys = function
-  | Initiator { _Ci; _ } ->
-    let send, recv = kdf2 ~ck:_Ci ~ikm:"" in
-    { send; recv }
-  | Responder { _Cr; _ } ->
-    let recv, send = kdf2 ~ck:_Cr ~ikm:"" in
-    { send; recv }
+let keys { keys; _ } = keys
 
 (*
 let run () =

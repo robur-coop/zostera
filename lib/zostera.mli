@@ -1,3 +1,13 @@
+(** Zostera, a pure implementation of the Wireguard protocol.
+
+    This module implements the Wireguard protocol which is described here:
+    https://www.wireguard.com/papers/wireguard.pdf
+*)
+
+type error = [ `Msg of string | Mirage_crypto_ec.error ]
+
+val pp_error : error Fmt.t
+
 type uid = private int32
 
 val uid : ?g:Mirage_crypto_rng.g -> unit -> uid
@@ -13,11 +23,6 @@ type unverified
 type verified
 
 type ('a, 'state) handshake
-
-type error =
-  [ `Msg of string | Mirage_crypto_ec.error ]
-
-val pp_error : error Fmt.t
 
 type psk
 
@@ -45,7 +50,8 @@ val validator : public -> validator
 type msg1 and mac1
 type cookie
 
-val cookie_of_pkt : validator -> mac1:mac1 -> string -> cookie option
+val cookie_of_pkt : validator -> now:(unit -> int) -> uid:uid -> mac1:mac1 -> string -> bool
+val cookie_of_validator : validator -> now:(unit -> int) -> cookie option
 
 val step0 :
      ?g:Mirage_crypto_rng.g
@@ -56,7 +62,6 @@ val step0 :
 
 val pkt_of_initiator :
      (initiator, unverified) handshake
-  -> uid
   -> public
   -> ?cookie:cookie
   -> msg1
@@ -70,7 +75,7 @@ val msg1_of_string :
   -> load:bool
   -> peer:addr
   -> string
-  -> ([ `Msg1 of uid * msg1 | `Cookie of cookie ], [> `Msg of string ]) result
+  -> ([ `Msg1 of uid * msg1 | `Cookie of string ], [> `Msg of string ]) result
 
 type msg2
 
@@ -84,25 +89,36 @@ val step1 :
 val pkt_of_responder :
      (responder, 'a) handshake
   -> uid
-  -> uid
   -> public
   -> ?cookie:cookie
   -> msg2
-  -> string
+  -> mac1 * string
+
+type link
 
 val msg2_of_string :
      ?cookie:cookie
   -> public
   -> string
-  -> (uid * uid * msg2, [> `Msg of string ]) result
+  -> (link * msg2, [> `Msg of string ]) result
+
+type session
 
 val step2 :
      ?psk:psk
+  -> now:(unit -> int)
+  -> link
   -> msg2
   -> t
-  -> (initiator, 'a) handshake
-  -> ((initiator, verified) handshake, [> error ]) result
+  -> (initiator, unverified) handshake
+  -> (session, [> error ]) result
+
+val session_of_responder :
+     now:(unit -> int)
+  -> uid
+  -> (responder, verified) handshake
+  -> session
 
 type keys = { send : string; recv : string }
 
-val keys : ('a, verified) handshake -> keys
+val keys : session -> keys
