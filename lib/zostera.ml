@@ -3,7 +3,136 @@
 let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
 let msgf fmt = Fmt.kstr (fun msg -> `Msg msg) fmt
 let guard ~err fn = if fn () then Ok () else Error err
+let strf fmt = Fmt.str fmt
 let ( let* ) = Result.bind
+
+(* NOTE(dinosaure): See https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-xchacha-03#section-2.2 *)
+let hchacha20 ~key ~nonce =
+  let s = Array.make 16 0l in
+  s.(0) <- 0x61707865l;
+  s.(1) <- 0x3320646el;
+  s.(2) <- 0x79622d32l;
+  s.(3) <- 0x6b206574l;
+  for i = 0 to 7 do s.(4+i) <- String.get_int32_le key (i*4) done;
+  for i = 0 to 3 do s.(12+i) <- String.get_int32_le nonce (i*4) done;
+  let ( <<< ) x n =
+    Int32.logor (Int32.shift_left x n) (Int32.shift_right_logical x (32 - n)) in
+  let qr a b c d =
+    s.(a) <- Int32.add s.(a) s.(b);
+    s.(d) <- (Int32.logxor s.(d) s.(a)) <<< 16;
+    s.(c) <- Int32.add s.(c) s.(d);
+    s.(b) <- (Int32.logxor s.(b) s.(c)) <<< 12;
+    s.(a) <- Int32.add s.(a) s.(b);
+    s.(d) <- (Int32.logxor s.(d) s.(a)) <<<  8;
+    s.(c) <- Int32.add s.(c) s.(d);
+    s.(b) <- (Int32.logxor s.(b) s.(c)) <<<  7 in
+  for _ = 1 to 10 do
+    qr 0 4  8 12;
+    qr 1 5  9 13;
+    qr 2 6 10 14;
+    qr 3 7 11 15;
+    qr 0 5 10 15;
+    qr 1 6 11 12;
+    qr 2 7  8 13;
+    qr 3 4  9 14
+  done;
+  let buf = Bytes.create 32 in
+  for i = 0 to 3 do Bytes.set_int32_le buf (i*4) s.(i) done;
+  for i = 0 to 3 do Bytes.set_int32_be buf (16+i*4) s.(12+i) done;
+  Bytes.unsafe_to_string buf
+
+let xaead ~key ~nonce ?adata msg =
+  let key = hchacha20 ~key ~nonce:(String.sub nonce 0 16) in
+  let key = Mirage_crypto.Chacha20.of_secret key in
+  let nonce = "\x00\x00\x00\x00" ^ String.sub nonce 16 8 in
+  Mirage_crypto.Chacha20.authenticate_encrypt ~key ~nonce ?adata msg
+
+let xaead_open ~key ~nonce ?adata msg =
+  let key = hchacha20 ~key ~nonce:(String.sub nonce 0 16) in
+  let key = Mirage_crypto.Chacha20.of_secret key in
+  let nonce = "\x00\x00\x00\x00" ^ String.sub nonce 16 8 in
+  Mirage_crypto.Chacha20.authenticate_decrypt ~key ~nonce ?adata msg
+
+type addr = { ipaddr : Ipaddr.t; port : int }
+
+let addr ipaddr ~port = { ipaddr; port }
+
+let octets_of_addr { ipaddr; port } =
+  let buf = Bytes.create 2 in
+  Bytes.set_uint16_be buf 0 port;
+  let port = Bytes.unsafe_to_string buf in
+  Ipaddr.to_octets ipaddr ^ port
+
+module Limiter = struct
+  type entry = { mutable tokens : float; mutable last : int }
+  type t = { tbl: (string, entry) Hashtbl.t; mutable gc : int }
+
+  let _GC_INTERVAL = 1_000_000_000 (* 1s *)
+  let _ENTRY_TTL = 1_000_000_000 (* 1s *)
+  let _PACKETS_PER_SECOND = 20.
+
+  (* NOTE(dinosaure): here, we accept a burst of 5 packets. *)
+
+  let _BURST = 5.
+  let _MAX_ENTRIES = 8192
+
+  let gc t ~now:ts =
+    if ts - t.gc >= _GC_INTERVAL then begin
+      t.gc <- ts;
+      let fn k entry acc =
+        if ts - entry.last > _ENTRY_TTL
+        then k :: acc else acc in
+      let stale = Hashtbl.fold fn t.tbl [] in
+      List.iter (Hashtbl.remove t.tbl) stale
+    end
+
+  let key = function
+    | Ipaddr.V4 v4 -> Ipaddr.V4.to_octets v4
+    | Ipaddr.V6 v6 -> String.sub (Ipaddr.V6.to_octets v6) 0 8
+
+  let allow t ~now { ipaddr; _ } =
+    let ts = now () in
+    gc t ~now:ts;
+    let key = key ipaddr in
+    match Hashtbl.find_opt t.tbl key with
+    | Some entry ->
+      let elapsed = float_of_int (ts - entry.last) /. 1e9 in
+      let tokens = entry.tokens +. elapsed *. _PACKETS_PER_SECOND in
+      let tokens = Float.min _BURST tokens in
+      entry.tokens <- tokens;
+      entry.last <- ts;
+      if entry.tokens >= 1.
+      then begin entry.tokens <- entry.tokens -. 1.; true end
+      else false
+    | None when Hashtbl.length t.tbl >= _MAX_ENTRIES -> false
+    | None ->
+      Hashtbl.replace t.tbl key { tokens= _BURST -. 1.; last= ts };
+      true
+end
+
+(* NOTE(dinosaure): [B2s] gives to us the real access to the BLAKE2S implementation
+   just because [Digestif.Make_BLAKE2S] does not expose [Keyed]... *)
+module B2s = struct
+  type ctx = bytes
+
+  external ctx_size : unit -> int = "caml_digestif_blake2s_ctx_size" [@@noalloc]
+  external with_outlen_and_key : ctx -> int -> string -> int -> int -> unit
+    = "caml_digestif_blake2s_st_init_with_outlen_and_key" [@@noalloc]
+  external update : ctx -> string -> int -> int -> unit
+    = "caml_digestif_blake2s_st_update" [@@noalloc]
+  external finalize : ctx -> bytes -> int -> unit
+    = "caml_digestif_blake2s_st_finalize" [@@noalloc]
+end
+
+let _mac ~key ?(off= 0) ?len buf =
+  if String.length key > 32 then invalid_arg "Bruit._mac: invalid key";
+  let len = match len with Some len -> len | None -> String.length buf - off in
+  let ctx = Bytes.create (B2s.ctx_size ()) in
+  B2s.with_outlen_and_key ctx 16 key 0 (String.length key);
+  B2s.update ctx buf off len;
+  let result = Bytes.create 16 in
+  B2s.finalize ctx result 0;
+  Bytes.unsafe_to_string result
 
 type error =
   [ `Msg of string | Mirage_crypto_ec.error ]
@@ -14,11 +143,47 @@ let pp_error ppf = function
 
 type uid = int32
 
-module Uid = struct
-  type t = uid
+let uid ?g () =
+  let tmp = Mirage_crypto_rng.generate ?g 4 in
+  String.get_int32_be tmp 0
 
-  let unsafe_of_int32 x = x
-end
+let _COOKIE_ROTATION = 120_000_000_000
+let _COOKIE_LIFETIME = 120_000_000_000
+
+type checker =
+  { mutable _Rm : string
+  ; mutable birth : int
+  ; mac1_key : string
+  ; cookie_key : string }
+
+let secret_of_checker checker ~now =
+  if now () - checker.birth > _COOKIE_ROTATION then begin
+    checker._Rm <- Mirage_crypto_rng.generate 32;
+    checker.birth <- now ()
+  end;
+  checker._Rm
+
+let cookie_key_of_public (_S_pub, _) =
+  let open Digestif in
+  let _K = BLAKE2S.digest_string (strf "cookie--%s" _S_pub) in
+  BLAKE2S.to_raw_string _K
+
+let checker ?g ~me:(_, ((_, mac1_key) as public)) () =
+  let cookie_key = cookie_key_of_public public in
+  let _Rm = Mirage_crypto_rng.generate ?g 32 in
+  { _Rm; birth= 0; mac1_key; cookie_key }
+
+type validator =
+  { cookie_key : string
+  ; mutable cookie : (string * int) option }
+
+let validator public =
+  let cookie_key = cookie_key_of_public public in
+  { cookie_key; cookie= None }
+
+type limiter = Limiter.t
+
+let limiter () = { Limiter.tbl= Hashtbl.create 0x100; gc= 0 }
 
 type initiator = Initiator
 type responder = Responder
@@ -43,20 +208,34 @@ let psk str =
   if String.length str <> 32 then invalid_arg "Bruit.psk: invalid private shared key";
   str
 
-let cookie str =
-  if String.length str <> 16 then invalid_arg "Bruit.cookie: invalid cookie";
-  str
+let cookie_of_pkt checker ~mac1 pkt =
+  if String.length pkt <> 64
+  || String.get_uint8 pkt 0 <> 3
+  then None
+  else
+    let nonce = String.sub pkt 8 24 in
+    let s = String.sub pkt 32 32 in
+    xaead_open ~key:checker.cookie_key ~nonce ~adata:mac1 s
 
 type secret = Mirage_crypto_ec.X25519.secret
 type public = string * string
+type t = secret * public
+
+let public (_, public) = public
 
 let gen ?g () : secret * public =
   let secret, public = Mirage_crypto_ec.X25519.gen_key ?g () in
   let open Digestif in
-  let ctx = BLAKE2S.hmac_init ~key:"mac1----" in
-  let ctx = BLAKE2S.hmac_feed_string ctx public in
-  let _K = BLAKE2S.hmac_get ctx |> BLAKE2S.to_raw_string in
+  let _K = BLAKE2S.digest_string (strf "mac1----%s" public)
+    |> BLAKE2S.to_raw_string in
   (secret, (public, _K))
+
+let public_of_octets str =
+  if String.length str <> 32 then invalid_arg "Bruit.public_of_octets: invalid public key";
+  let open Digestif in
+  let _K = BLAKE2S.digest_string (strf "mac1----%s" str) in
+  let _K = BLAKE2S.to_raw_string _K in
+  (str, _K)
 
 let mix hash str =
   let open Digestif in
@@ -132,22 +311,10 @@ let _K_cookie cookie =
 let mac2 ?(off= 0) pkt = function
   | None -> Bytes.blit_string empty 0 pkt off 16
   | Some cookie ->
-    let open Digestif in
-    let ctx = BLAKE2S.hmac_init ~key:(_K_cookie cookie) in
-    let ctx = BLAKE2S.hmac_feed_bytes ctx pkt ~off:0 ~len:off in
-    let mac2 = BLAKE2S.hmac_get ctx |> BLAKE2S.to_raw_string in
+    let mac2 = _mac ~key:cookie (Bytes.unsafe_to_string pkt) ~off:0 ~len:off in
     Bytes.blit_string mac2 0 pkt off 16
 
-let verify_mac2 ?(off= 0) str = function
-  | None -> String.sub str off 16 = empty
-  | Some cookie ->
-    let open Digestif in
-    let ctx = BLAKE2S.hmac_init ~key:(_K_cookie cookie) in
-    let ctx = BLAKE2S.hmac_feed_string ctx str ~off:0 ~len:off in
-    let mac2 = BLAKE2S.hmac_get ctx |> BLAKE2S.to_raw_string in
-    Eqaf.equal (String.sub str off 16) (String.sub mac2 0 16)
-
-type msg1 = string * string * string
+type msg1 = string * string * string and mac1 = string
 
 let step0 ?g ~now (_Si_priv, (_Si_pub, _)) (_Sr_pub, _) =
   let open Digestif in
@@ -185,36 +352,58 @@ let step0 ?g ~now (_Si_priv, (_Si_pub, _)) (_Sr_pub, _) =
 let pkt_of_initiator (Initiator _) uid (_, _Kr) ?cookie (ephemeral, static, timestamp) =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 1;
-  Bytes.set_int32_be pkt 4 uid;
+  Bytes.set_int32_le pkt 4 uid;
   Bytes.blit_string ephemeral 0 pkt 8 32;
   Bytes.blit_string static 0 pkt 40 48;
   Bytes.blit_string timestamp 0 pkt 88 28;
-  let open Digestif in
-  let mac1 = BLAKE2S.hmac_init ~key:_Kr in
-  let mac1 = BLAKE2S.hmac_feed_bytes mac1 pkt ~off:0 ~len:116 in
-  let mac1 = BLAKE2S.hmac_get mac1 |> BLAKE2S.to_raw_string in
+  let mac1 = _mac ~key:_Kr (Bytes.unsafe_to_string pkt) ~off:0 ~len:116 in
   Bytes.blit_string mac1 0 pkt 116 16;
   mac2 ~off:132 pkt cookie;
+  (mac1, Bytes.unsafe_to_string pkt)
+
+let tau checker ~now addr =
+  _mac ~key:(secret_of_checker checker ~now) (octets_of_addr addr)
+
+let verify_mac ~key ~off pkt =
+  let expect = _mac ~key pkt ~off:0 ~len:off in
+  let have = String.sub pkt off 16 in
+  String.equal expect have (* TODO(dinosaure): constant time *)
+
+let cookie ?g (checker : checker) ~tau str =
+  let pkt = Bytes.make 64 '\000' in
+  Bytes.set_uint8 pkt 0 3;
+  Bytes.blit_string str 4 pkt 4 4;
+  let nonce = Mirage_crypto_rng.generate ?g 24 in
+  Bytes.blit_string nonce 0 pkt 8 24;
+  let adata = String.sub str (String.length str - 32) 16 in
+  let s = xaead ~key:checker.cookie_key ~nonce ~adata tau in
+  Bytes.blit_string s 0 pkt 32 32;
   Bytes.unsafe_to_string pkt
 
-let msg1_of_string ?cookie (_, _Kr) str =
+let msg1_of_string ?g checker limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg1 packet") @@ fun () ->
-    String.length str >= 148 in
+    String.length pkt = 148 in
   let* () = guard ~err:(msgf "Invalid msg1 packet") @@ fun () ->
-    str.[0] = '\x01' in
-  let uid = String.get_int32_be str 4 in
-  let ephemeral = String.sub str 8 32 in
-  let static = String.sub str 40 48 in
-  let timestamp = String.sub str 88 28 in
+    String.get_uint8 pkt 0 = 1 in
   let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
-    let open Digestif in
-    let mac1 = BLAKE2S.hmac_init ~key:_Kr in
-    let mac1 = BLAKE2S.hmac_feed_string mac1 str ~off:0 ~len:116 in
-    let mac1 = BLAKE2S.hmac_get mac1 |> BLAKE2S.to_raw_string in
-    Eqaf.equal (String.sub str 116 16) (String.sub mac1 0 16) in
-  let* () = guard ~err:(msgf "Invalid MAC2") @@ fun () ->
-    verify_mac2 ~off:132 str cookie in
-  Ok (uid, (ephemeral, static, timestamp))
+    verify_mac ~key:checker.mac1_key ~off:116 pkt in
+  let* continue =
+    if not load then Ok `Ok
+    else
+      let tau = tau checker ~now peer in
+      if not (verify_mac ~key:tau ~off:132 pkt)
+      then Ok (`Cookie (cookie ?g checker ~tau pkt))
+      else if not (Limiter.allow limiter ~now peer)
+      then error_msgf "Too many retries"
+      else Ok `Ok in
+  match continue with
+  | `Cookie _ as cookie -> Ok cookie
+  | `Ok ->
+    let uid = String.get_int32_le pkt 4 in
+    let ephemeral = String.sub pkt 8 32 in
+    let static = String.sub pkt 40 48 in
+    let timestamp = String.sub pkt 88 28 in
+    Ok (`Msg1 (uid, (ephemeral, static, timestamp)))
 
 type msg2 = string * string
 
@@ -264,14 +453,11 @@ let pkt_of_responder
   = fun (Responder _) uid0 uid1 (_, _Ki) ?cookie (ephemeral, empty) ->
   let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 2;
-  Bytes.set_int32_be pkt 4 uid0;
-  Bytes.set_int32_be pkt 8 uid1;
+  Bytes.set_int32_le pkt 4 uid0;
+  Bytes.set_int32_le pkt 8 uid1;
   Bytes.blit_string ephemeral 0 pkt 12 32;
   Bytes.blit_string empty 0 pkt 44 16;
-  let open Digestif in
-  let mac1 = BLAKE2S.hmac_init ~key:_Ki in
-  let mac1 = BLAKE2S.hmac_feed_bytes mac1 pkt ~off:0 ~len:60 in
-  let mac1 = BLAKE2S.hmac_get mac1 |> BLAKE2S.to_raw_string in
+  let mac1 = _mac ~key:_Ki (Bytes.unsafe_to_string pkt) ~off:0 ~len:60 in
   Bytes.blit_string mac1 0 pkt 60 16;
   mac2 ~off:76 pkt cookie;
   Bytes.unsafe_to_string pkt
@@ -281,18 +467,16 @@ let msg2_of_string ?cookie (_, _Ki) str =
     String.length str >= 92 in
   let* () = guard ~err:(msgf "Invalid msg2 packet") @@ fun () ->
     str.[0] = '\x02' in
-  let uid0 = String.get_int32_be str 4 in
-  let uid1 = String.get_int32_be str 8 in
+  let uid0 = String.get_int32_le str 4 in
+  let uid1 = String.get_int32_le str 8 in
   let ephemeral = String.sub str 12 32 in
   let empty = String.sub str 44 16 in
   let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
-    let open Digestif in
-    let mac1 = BLAKE2S.hmac_init ~key:_Ki in
-    let mac1 = BLAKE2S.hmac_feed_string mac1 str ~off:0 ~len:60 in
-    let mac1 = BLAKE2S.hmac_get mac1 |> BLAKE2S.to_raw_string in
-    Eqaf.equal (String.sub str 60 16) (String.sub mac1 0 16) in
+    verify_mac ~key:_Ki ~off:60 str in
   let* () = guard ~err:(msgf "Invalid MAC2") @@ fun () ->
-    verify_mac2 ~off:76 str cookie in
+    match cookie with
+    | None -> true
+    | Some cookie -> verify_mac ~key:cookie ~off:96 str in
   Ok (uid0, uid1, (ephemeral, empty))
 
 let step2 ?psk:(_Q= _Q) (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _Hi; _Ei_priv }) =
@@ -308,9 +492,15 @@ let step2 ?psk:(_Q= _Q) (_Er_pub, empty) (_Si_priv, _Si_pub) (Initiator { _Ci; _
   let _Hi = mix _Hi empty in
   Ok (Initiator { _Hi; _Ci; _Ei_priv })
 
-let keys : type a. (a, verified) handshake -> string * string = function
-  | Initiator { _Ci; _ } -> kdf2 ~ck:_Ci ~ikm:""
-  | Responder { _Cr; _ } -> kdf2 ~ck:_Cr ~ikm:""
+type keys = { send : string; recv : string }
+
+let keys : type a. (a, verified) handshake -> keys = function
+  | Initiator { _Ci; _ } ->
+    let send, recv = kdf2 ~ck:_Ci ~ikm:"" in
+    { send; recv }
+  | Responder { _Cr; _ } ->
+    let recv, send = kdf2 ~ck:_Cr ~ikm:"" in
+    { send; recv }
 
 (*
 let run () =

@@ -1,10 +1,10 @@
 type uid = private int32
 
-module Uid : sig
-  type t = uid
+val uid : ?g:Mirage_crypto_rng.g -> unit -> uid
 
-  val unsafe_of_int32 : int32 -> t
-end
+type limiter
+
+val limiter : unit -> limiter
 
 type initiator
 type responder
@@ -20,22 +20,37 @@ type error =
 val pp_error : error Fmt.t
 
 type psk
-type cookie
 
 val psk : string -> psk
-val cookie : string -> cookie
 
-type secret
+type addr
+
+val addr : Ipaddr.t -> port:int -> addr
+
+type t
 type public
 
-val gen : ?g:Mirage_crypto_rng.g -> unit -> secret * public
+val gen : ?g:Mirage_crypto_rng.g -> unit -> t
+val public_of_octets : string -> public
+val public : t -> public
 
-type msg1
+type checker
+
+val checker : ?g:Mirage_crypto_rng.g -> me:t -> unit -> checker
+
+type validator
+
+val validator : public -> validator
+
+type msg1 and mac1
+type cookie
+
+val cookie_of_pkt : validator -> mac1:mac1 -> string -> cookie option
 
 val step0 :
      ?g:Mirage_crypto_rng.g
   -> now:(unit -> int)
-  -> (secret * public)
+  -> t
   -> public
   -> ((initiator, unverified) handshake * msg1, [> error ]) result
 
@@ -45,13 +60,17 @@ val pkt_of_initiator :
   -> public
   -> ?cookie:cookie
   -> msg1
-  -> string
+  -> mac1 * string
 
 val msg1_of_string :
-     ?cookie:cookie
-  -> public
+     ?g:Mirage_crypto_rng.g
+  -> checker
+  -> limiter
+  -> now:(unit -> int)
+  -> load:bool
+  -> peer:addr
   -> string
-  -> (uid * msg1, [> `Msg of string ]) result
+  -> ([ `Msg1 of uid * msg1 | `Cookie of cookie ], [> `Msg of string ]) result
 
 type msg2
 
@@ -59,7 +78,7 @@ val step1 :
      ?g:Mirage_crypto_rng.g
   -> ?psk:psk
   -> msg1
-  -> (secret * public)
+  -> t
   -> ((responder, verified) handshake * msg2, [> error ]) result
 
 val pkt_of_responder :
@@ -80,8 +99,10 @@ val msg2_of_string :
 val step2 :
      ?psk:psk
   -> msg2
-  -> (secret * public)
+  -> t
   -> (initiator, 'a) handshake
   -> ((initiator, verified) handshake, [> error ]) result
 
-val keys : ('a, verified) handshake -> string * string
+type keys = { send : string; recv : string }
+
+val keys : ('a, verified) handshake -> keys
