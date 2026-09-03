@@ -57,6 +57,15 @@ type addr = { ipaddr : Ipaddr.t; port : int }
 
 let addr ipaddr ~port = { ipaddr; port }
 
+let addr_of_string str ~port =
+  let* ipaddr, port = Ipaddr.with_port_of_string ~default:port str in
+  Ok { ipaddr; port }
+
+let addr_of_string_exn str ~port =
+  match Ipaddr.with_port_of_string ~default:port str with
+  | Ok (ipaddr, port) -> { ipaddr; port }
+  | Error _ -> invalid_arg "Bruit.addr_of_string_exn"
+
 let octets_of_addr { ipaddr; port } =
   let buf = Bytes.create 2 in
   Bytes.set_uint16_be buf 0 port;
@@ -190,8 +199,8 @@ let limiter () = { Limiter.tbl= Hashtbl.create 0x100; gc= 0 }
 type initiator = Initiator
 type responder = Responder
 
-type unverified = |
-type verified = |
+type pending = |
+type confirmed = |
 
 type ('a, 'state) handshake =
   | Initiator : { _Hi : Digestif.BLAKE2S.t
@@ -201,7 +210,7 @@ type ('a, 'state) handshake =
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
     ; uid : uid
-    ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, verified) handshake
+    ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, confirmed) handshake
 
 type psk = string
 type cookie = string

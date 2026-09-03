@@ -1,16 +1,8 @@
 let ( let* ) = Result.bind
 let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
 
-let peer0 =
-  let* ipaddr, port = Ipaddr.with_port_of_string ~default:1234 "1.2.3.4:5678" in
-  Ok (Zostera.addr ipaddr ~port)
-
-let peer1 =
-  let* ipaddr, port = Ipaddr.with_port_of_string ~default:1234 "4.3.2.1:5678" in
-  Ok (Zostera.addr ipaddr ~port)
-
-let peer0 = Result.get_ok peer0
-let peer1 = Result.get_ok peer1
+let peer0 = Zostera.addr_of_string_exn ~port:1234 "1.2.3.4:5678"
+let peer1 = Zostera.addr_of_string_exn ~port:1234 "4.3.2.1:5678"
 
 type entry = { psk : Zostera.psk option; mutable last : Zostera.timestamp option }
 let peers : (string, entry) Hashtbl.t = Hashtbl.create 0x10
