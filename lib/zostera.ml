@@ -146,11 +146,12 @@ let _mac ~key ?(off= 0) ?len buf =
   Bytes.unsafe_to_string result
 
 type error =
-  [ `Msg of string | Mirage_crypto_ec.error ]
+  [ `Msg of string | `Invalid_cookie | Mirage_crypto_ec.error ]
 
 let pp_error ppf = function
   | #Mirage_crypto_ec.error as err -> Mirage_crypto_ec.pp_error ppf err
   | `Msg msg -> Fmt.string ppf msg
+  | `Invalid_cookie -> Fmt.string ppf "Invalid cookie"
 
 type uid = int32
 
@@ -161,25 +162,27 @@ let uid ?g () =
 let _COOKIE_ROTATION = 120_000_000_000
 let _COOKIE_LIFETIME = 120_000_000_000
 
-type checker =
+type cookie_generator =
   { mutable _Rm : string
   ; mutable birth : int
   ; mac1_key : string
   ; cookie_key : string }
 
-let secret_of_checker checker ~now =
-  if now () - checker.birth > _COOKIE_ROTATION then begin
-    checker._Rm <- Mirage_crypto_rng.generate 32;
-    checker.birth <- now ()
+let secret_of_cookie_generator cookie_generator ~now =
+  (* NOTE(dinosaure): it's lazy roundtrip of [_Rm] *)
+  let now = now () in
+  if now - cookie_generator.birth > _COOKIE_ROTATION then begin
+    cookie_generator._Rm <- Mirage_crypto_rng.generate 32;
+    cookie_generator.birth <- now
   end;
-  checker._Rm
+  cookie_generator._Rm
 
 let cookie_key_of_public (_S_pub, _) =
   let open Digestif in
   let _K = BLAKE2S.digest_string (strf "cookie--%s" _S_pub) in
   BLAKE2S.to_raw_string _K
 
-let checker ?g ~me:(_, ((_, mac1_key) as public)) () =
+let cookie_generator ?g ~me:(_, ((_, mac1_key) as public)) () =
   let cookie_key = cookie_key_of_public public in
   let _Rm = Mirage_crypto_rng.generate ?g 32 in
   { _Rm; birth= 0; mac1_key; cookie_key }
@@ -212,8 +215,10 @@ type ('a, 'state) handshake =
     ; uid : uid
     ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, confirmed) handshake
 
+let uid_of_initiator (Initiator { uid; _ }) = uid
+
 type psk = string
-type cookie = string
+type cookie = { cookie : string; birth : int }
 
 let _Q = String.make 32 '\000'
 
@@ -221,23 +226,17 @@ let psk str =
   if String.length str <> 32 then invalid_arg "Bruit.psk: invalid private shared key";
   str
 
-let cookie_of_pkt validator ~now ~uid ~mac1 pkt =
+let check_cookie_of_pkt validator ~now ~uid ~mac1 pkt =
   if String.length pkt <> 64
   || String.get_uint8 pkt 0 <> 3
   || String.get_int32_le pkt 4 <> uid
-  then false
+  then Error `Invalid_cookie
   else
     let nonce = String.sub pkt 8 24 in
     let s = String.sub pkt 32 32 in
     match xaead_open ~key:validator.cookie_key ~nonce ~adata:mac1 s with
-    | Some cookie -> validator.cookie <- Some (cookie, now()); true
-    | None -> false
-
-let cookie_of_validator validator ~now =
-  match validator.cookie with
-  | Some (cookie, birth) when now () - birth <= _COOKIE_LIFETIME -> Some cookie
-  | Some _ -> validator.cookie <- None; None
-  | None -> None
+    | Some cookie -> Ok { cookie; birth= now () }
+    | None -> Error `Invalid_cookie
 
 type secret = Mirage_crypto_ec.X25519.secret
 type public = string * string
@@ -332,7 +331,7 @@ let empty = String.make 16 '\x00'
 
 let mac2 ?(off= 0) pkt = function
   | None -> Bytes.blit_string empty 0 pkt off 16
-  | Some cookie ->
+  | Some { cookie; _ } -> (* TODO(dinosaure): expiration *)
     let mac2 = _mac ~key:cookie (Bytes.unsafe_to_string pkt) ~off:0 ~len:off in
     Bytes.blit_string mac2 0 pkt off 16
 
@@ -384,43 +383,43 @@ let pkt_of_initiator (Initiator { uid; _ }) (_, _Kr) ?cookie (ephemeral, static,
   mac2 ~off:132 pkt cookie;
   (mac1, Bytes.unsafe_to_string pkt)
 
-let tau checker ~now addr =
-  _mac ~key:(secret_of_checker checker ~now) (octets_of_addr addr)
+let tau cookie_generator ~now addr =
+  _mac ~key:(secret_of_cookie_generator cookie_generator ~now) (octets_of_addr addr)
 
 let verify_mac ~key ~off pkt =
   let expect = _mac ~key pkt ~off:0 ~len:off in
   let have = String.sub pkt off 16 in
   String.equal expect have (* TODO(dinosaure): constant time *)
 
-let cookie ?g (checker : checker) ~tau str =
+let cookie ?g (cookie_generator : cookie_generator) ~tau str =
   let pkt = Bytes.make 64 '\000' in
   Bytes.set_uint8 pkt 0 3;
   Bytes.blit_string str 4 pkt 4 4;
   let nonce = Mirage_crypto_rng.generate ?g 24 in
   Bytes.blit_string nonce 0 pkt 8 24;
   let adata = String.sub str (String.length str - 32) 16 in
-  let s = xaead ~key:checker.cookie_key ~nonce ~adata tau in
+  let s = xaead ~key:cookie_generator.cookie_key ~nonce ~adata tau in
   Bytes.blit_string s 0 pkt 32 32;
   Bytes.unsafe_to_string pkt
 
-let defend ?g checker limiter ~now ~load ~peer ~off pkt =
+let defend ?g cookie_generator limiter ~now ~load ~peer ~off pkt =
   let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
-    verify_mac ~key:checker.mac1_key ~off pkt in
+    verify_mac ~key:cookie_generator.mac1_key ~off pkt in
   if not load then Ok `Ok
   else
-    let tau = tau checker ~now peer in
+    let tau = tau cookieError `Invalid_cookie ~now peer in
     if not (verify_mac ~key:tau ~off:(off + 16) pkt)
-    then Ok (`Cookie (cookie ?g checker ~tau pkt))
+    then Ok (`Cookie (cookie ?g cookie_generator ~tau pkt))
     else if not (Limiter.allow limiter ~now peer)
     then error_msgf "Too many retries"
     else Ok `Ok
 
-let msg1_of_string ?g checker limiter ~now ~load ~peer pkt =
+let msg1_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg1 packet") @@ fun () ->
     String.length pkt = 148 in
   let* () = guard ~err:(msgf "Invalid msg1 packet") @@ fun () ->
     String.get_uint8 pkt 0 = 1 in
-  let* continue = defend ?g checker limiter ~now ~load ~peer ~off:116 pkt in
+  let* continue = defend ?g cookie_generator limiter ~now ~load ~peer ~off:116 pkt in
   match continue with
   | `Cookie _ as cookie -> Ok cookie
   | `Ok ->
@@ -494,12 +493,12 @@ let pkt_of_responder
 
 type link = { sender : uid; receiver : uid }
 
-let msg2_of_string ?g checker limiter ~now ~load ~peer pkt =
+let msg2_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg2 packet") @@ fun () ->
     String.length pkt = 92 in
   let* () = guard ~err:(msgf "Invalid msg2 packet") @@ fun () ->
     pkt.[0] = '\x02' in
-  let* continue = defend ?g checker limiter ~now ~load ~peer ~off:60 pkt in
+  let* continue = defend ?g cookie_generator limiter ~now ~load ~peer ~off:60 pkt in
   match continue with
   | `Cookie _ as cookie -> Ok cookie
   | `Ok ->

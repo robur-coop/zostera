@@ -4,12 +4,16 @@
     https://www.wireguard.com/papers/wireguard.pdf
 *)
 
-type error = [ `Msg of string | Mirage_crypto_ec.error ]
+type error = [ `Msg of string | `Invalid_cookie | Mirage_crypto_ec.error ]
 (** Error returned by the handshake steps and the packet decoders. The only
     thing to do in the event of an error is to {i drop} the current operation
     (drop packets and cancel handshakes). *)
 
 val pp_error : error Fmt.t
+
+type uid = private int32
+
+val uid : ?g:Mirage_crypto_rng.g -> unit -> uid
 
 (** {1 Identities.} *)
 
@@ -51,13 +55,29 @@ val addr : Ipaddr.t -> port:int -> addr
 val addr_of_string : string -> port:int -> (addr, [> `Msg of string ]) result
 val addr_of_string_exn : string -> port:int -> addr
 
-type checker
+type mac1
 
-val checker : ?g:Mirage_crypto_rng.g -> me:t -> unit -> checker
+(** {2 Cookies.} *)
 
-type uid = private int32
+type cookie_generator
 
-val uid : ?g:Mirage_crypto_rng.g -> unit -> uid
+val cookie_generator : ?g:Mirage_crypto_rng.g -> me:t -> unit -> cookie_generator
+
+type validator
+
+val validator : public -> validator
+
+type cookie
+(** To prevent denial of service attacks a peer may send back a cookie while
+    under load. A [cookie] represents such a cookie. *)
+
+val check_cookie_of_pkt :
+     validator
+  -> now:(unit -> int)
+  -> uid:uid
+  -> mac1:mac1
+  -> string
+  -> (cookie, [> error ]) result
 
 type limiter
 
@@ -75,19 +95,13 @@ type confirmed
 
 type ('a, 'state) handshake
 
+val uid_of_initiator : (initiator, pending) handshake -> uid
+
 type psk
 
 val psk : string -> psk
 
-type validator
-
-val validator : public -> validator
-
-type msg1 and mac1
-type cookie
-
-val cookie_of_pkt : validator -> now:(unit -> int) -> uid:uid -> mac1:mac1 -> string -> bool
-val cookie_of_validator : validator -> now:(unit -> int) -> cookie option
+type msg1
 
 val step0 :
      ?g:Mirage_crypto_rng.g
@@ -105,7 +119,7 @@ val pkt_of_initiator :
 
 val msg1_of_string :
      ?g:Mirage_crypto_rng.g
-  -> checker
+  -> cookie_generator
   -> limiter
   -> now:(unit -> int)
   -> load:bool
@@ -134,7 +148,7 @@ type link
 
 val msg2_of_string :
      ?g:Mirage_crypto_rng.g
-  -> checker
+  -> cookie_generator
   -> limiter
   -> now:(unit -> int)
   -> load:bool
