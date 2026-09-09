@@ -407,7 +407,7 @@ let defend ?g cookie_generator limiter ~now ~load ~peer ~off pkt =
     verify_mac ~key:cookie_generator.mac1_key ~off pkt in
   if not load then Ok `Ok
   else
-    let tau = tau cookieError `Invalid_cookie ~now peer in
+    let tau = tau cookie_generator ~now peer in
     if not (verify_mac ~key:tau ~off:(off + 16) pkt)
     then Ok (`Cookie (cookie ?g cookie_generator ~tau pkt))
     else if not (Limiter.allow limiter ~now peer)
