@@ -228,7 +228,7 @@ let psk str =
 
 let check_cookie_of_pkt validator ~now ~uid ~mac1 pkt =
   if String.length pkt <> 64
-  || String.get_uint8 pkt 0 <> 3
+  || String.get_int32_le pkt 0 <> 3l
   || String.get_int32_le pkt 4 <> uid
   then Error `Invalid_cookie
   else
@@ -418,7 +418,7 @@ let msg1_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg1 packet") @@ fun () ->
     String.length pkt = 148 in
   let* () = guard ~err:(msgf "Invalid msg1 packet") @@ fun () ->
-    String.get_uint8 pkt 0 = 1 in
+    String.get_int32_le pkt 0 = 1l in
   let* continue = defend ?g cookie_generator limiter ~now ~load ~peer ~off:116 pkt in
   match continue with
   | `Cookie _ as cookie -> Ok cookie
@@ -497,7 +497,7 @@ let msg2_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg2 packet") @@ fun () ->
     String.length pkt = 92 in
   let* () = guard ~err:(msgf "Invalid msg2 packet") @@ fun () ->
-    pkt.[0] = '\x02' in
+    String.get_int32_le pkt 0 = 2l in
   let* continue = defend ?g cookie_generator limiter ~now ~load ~peer ~off:60 pkt in
   match continue with
   | `Cookie _ as cookie -> Ok cookie
