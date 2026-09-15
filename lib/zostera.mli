@@ -15,6 +15,10 @@ type uid = private int32
 
 val uid : ?g:Mirage_crypto_rng.g -> unit -> uid
 
+type psk
+
+val psk : string -> psk
+
 (** {1 Identities.} *)
 
 type t
@@ -41,6 +45,16 @@ val octets_of_public : public -> string
 val public : t -> public
 (** [public t] is the public key from the given identity [t]. *)
 
+type remote
+
+val remote : ?psk:psk -> t -> public -> (remote, [> error ]) result
+val remote_of_octets : ?psk:psk -> t -> string -> (remote, [> error ]) result
+val octets_of_remote : remote -> string
+
+type shared
+
+val shared : t -> public -> (shared, [> error ]) result
+
 type mac1
 
 (** {2 Cookies.} *)
@@ -51,7 +65,7 @@ val cookie_generator : ?g:Mirage_crypto_rng.g -> me:t -> unit -> cookie_generato
 
 type validator
 
-val validator : public -> validator
+val validator : remote -> validator
 
 type cookie
 (** To prevent denial of service attacks a peer may send back a cookie while
@@ -82,23 +96,18 @@ type ('a, 'state) handshake
 
 val uid_of_initiator : (initiator, pending) handshake -> uid
 
-type psk
-
-val psk : string -> psk
-
 type msg1
 
 val step0 :
      ?g:Mirage_crypto_rng.g
   -> now:(unit -> int)
   -> t
-  -> public
+  -> remote
   -> ((initiator, pending) handshake * msg1, [> error ]) result
 
 val pkt_of_initiator :
      now:(unit -> int)
   -> (initiator, pending) handshake
-  -> public
   -> ?cookie:cookie
   -> msg1
   -> mac1 * string
@@ -117,7 +126,8 @@ type msg2
 
 val step1 :
      ?g:Mirage_crypto_rng.g
-  -> peer:(public -> timestamp -> [ `Accept of psk option | `Reject ])
+  -> peer:(public -> [ `Accept of shared * psk option * (timestamp -> bool)
+                     | `Reject ])
   -> msg1
   -> t
   -> ((responder, confirmed) handshake * msg2, [> error ]) result
@@ -146,8 +156,7 @@ val msg2_of_string :
 type session
 
 val step2 :
-     ?psk:psk
-  -> now:(unit -> int)
+     now:(unit -> int)
   -> link
   -> msg2
   -> t

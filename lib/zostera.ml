@@ -128,9 +128,12 @@ type validator =
   { cookie_key : string
   ; mutable cookie : (string * int) option }
 
-let validator public =
-  let cookie_key = cookie_key_of_public public in
-  { cookie_key; cookie= None }
+type remote =
+  { octets : string
+  ; mac1_key : string
+  ; cookie_key : string
+  ; _SS : string
+  ; _Q : string }
 
 type initiator = Initiator
 type responder = Responder
@@ -142,6 +145,7 @@ type ('a, 'state) handshake =
   | Initiator : { _Hi : Digestif.BLAKE2S.t
     ; _Ci : string
     ; uid : uid
+    ; remote : remote
     ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> (initiator, 'state) handshake
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
@@ -159,7 +163,7 @@ let psk str =
   if String.length str <> 32 then invalid_arg "Bruit.psk: invalid private shared key";
   str
 
-let check_cookie_of_pkt validator ~now ~uid ~mac1 pkt =
+let check_cookie_of_pkt (validator : validator) ~now ~uid ~mac1 pkt =
   if String.length pkt <> 64
   || String.get_int32_le pkt 0 <> 3l
   || String.get_int32_le pkt 4 <> uid
@@ -266,6 +270,26 @@ let decrypt _k ?(counter= 0L) txt _Hr =
 
 let empty = String.make 16 '\x00'
 
+(* remote *)
+
+let remote ?psk:(_Q= _Q) (_S_priv, _) ((octets, mac1_key) as public : public) =
+  let* _SS = dh _S_priv octets in
+  let cookie_key = cookie_key_of_public public in
+  Ok { octets; mac1_key; cookie_key; _SS; _Q }
+
+let remote_of_octets ?psk t str = remote ?psk t (public_of_octets str)
+let octets_of_remote { octets; _ } = octets
+
+(* validator *)
+
+let validator ({ cookie_key; _ } : remote) = { cookie_key; cookie= None }
+
+(* shared *)
+
+type shared = string
+
+let shared (_S_priv, _) (_S_pub, _) = dh _S_priv _S_pub
+
 let mac2 ~now ?(off= 0) pkt = function
   | Some { cookie; birth } when now () < birth + _COOKIE_LIFETIME ->
     let mac2 = _mac ~key:cookie (Bytes.unsafe_to_string pkt) ~off:0 ~len:off in
@@ -274,7 +298,8 @@ let mac2 ~now ?(off= 0) pkt = function
 
 type msg1 = string * string * string and mac1 = string
 
-let step0 ?g ~now (_Si_priv, (_Si_pub, _)) (_Sr_pub, _) =
+let step0 ?g ~now ((_Si_priv, (_Si_pub, _)) : t)
+  (({ octets= _Sr_pub; _SS; _ } as remote) : remote) =
   let open Digestif in
   (* Ci := Hash(Construction) *)
   let _Ci = BLAKE2S.digest_string "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s" in
@@ -299,16 +324,16 @@ let step0 ?g ~now (_Si_priv, (_Si_pub, _)) (_Sr_pub, _) =
   (* Hi := Hash(Hi || msg.static) *)
   let _Hi = mix _Hi static in
   (* (Ci, k) := Kdf2(Ci, DH(Si_priv, Sr_pub) *)
-  let* _SS = dh _Si_priv _Sr_pub in
+  (* let* _SS = dh _Si_priv _Sr_pub in *)
   let _Ci, _k = kdf2 ~ck:_Ci ~ikm:_SS in
   (* msg.timestamp := Aead(k, 0, Timestamp(), Hi) *)
   let timestamp = aead _k (tai64n ~now) _Hi in
   (* Hi := Hash(Hi || msg.timestamp) *)
   let _Hi = mix _Hi timestamp in
   let uid = uid ?g () in
-  Ok (Initiator { _Hi; _Ci; uid; _Ei_priv }, (ephemeral, static, timestamp))
+  Ok (Initiator { _Hi; _Ci; uid; remote; _Ei_priv }, (ephemeral, static, timestamp))
 
-let pkt_of_initiator ~now (Initiator { uid; _ }) (_, _Kr) ?cookie (ephemeral, static, timestamp) =
+let pkt_of_initiator ~now (Initiator { uid; remote= { mac1_key= _Kr; _ }; _ }) ?cookie (ephemeral, static, timestamp) =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 1;
   Bytes.set_int32_le pkt 4 uid;
@@ -339,7 +364,7 @@ let cookie ?g (cookie_generator : cookie_generator) ~tau str =
   Bytes.blit_string s 0 pkt 32 32;
   Bytes.unsafe_to_string pkt
 
-let defend ?g cookie_generator limiter ~now ~load ~peer ~off pkt =
+let defend ?g (cookie_generator : cookie_generator) limiter ~now ~load ~peer ~off pkt =
   let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
     verify_mac ~key:cookie_generator.mac1_key ~off pkt in
   if not load then Ok `Ok
@@ -381,14 +406,14 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SE in
   let* _Si_pub = decrypt _k static _Hr in
   let _Hr = mix _Hr static in
-  let* _SS = dh _Sr_priv _Si_pub in (* _SS *)
+  let* _SS, _Q, fresh = match peer (public_of_octets _Si_pub) with
+    | `Accept (_SS, Some _Q, fresh) -> Ok (_SS, _Q, fresh)
+    | `Accept (_SS, None, fresh) -> Ok (_SS, _Q, fresh)
+    | `Reject -> error_msgf "Unknown peer" in
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SS in
   let* _t = decrypt _k timestamp _Hr in
   let _Hr = mix _Hr timestamp in
-  let* _Q = match peer (public_of_octets _Si_pub) _t with
-    | `Accept (Some psk) -> Ok psk
-    | `Accept None -> Ok _Q
-    | `Reject -> error_msgf "Unknown or replayed peer" in
+  let* () = guard ~err:(msgf "Replayed peer") @@ fun () -> fresh _t in
   (* (Er_priv, Er_pub) := DH-Generate() *)
   let _Er_priv, _Er_pub = Mirage_crypto_ec.X25519.gen_key ?g () in
   (* Cr := Kdf1(Cr, Er_pub) *)
@@ -478,8 +503,8 @@ let session ~now ~role ~local ~remote _C =
   { local; remote; keys; birth= now ()
   ; role; counter= 0L; window= Window.make (); confirmed= (role = Initiator) }
 
-let step2 ?psk:(_Q= _Q) ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _Si_pub)
-  (Initiator { _Ci; _Hi; uid; _Ei_priv } : (initiator, _) handshake) =
+let step2 ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _Si_pub)
+  (Initiator { _Ci; _Hi; uid; remote= { _Q; _ }; _Ei_priv } : (initiator, _) handshake) =
   let* () = guard ~err:(msgf "Unexpected receiver UID") @@ fun () ->
     receiver = uid in
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in

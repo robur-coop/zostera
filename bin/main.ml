@@ -6,19 +6,21 @@ let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
 let peer0 = Zostera.Addr.of_string_exn ~port:1234 "1.2.3.4:5678"
 let peer1 = Zostera.Addr.of_string_exn ~port:1234 "4.3.2.1:5678"
 
-type entry = { psk : Zostera.psk option; mutable last : Zostera.timestamp option }
+type entry = { shared: Zostera.shared; psk: Zostera.psk option; mutable last : Zostera.timestamp option }
 let peers : (string, entry) Hashtbl.t = Hashtbl.create 0x10
 (* [peers] exists on the [r] side (it can exists on both side but may be empty on [i] side) *)
 
-let authorize public timestamp =
+let authorize public =
   match Hashtbl.find_opt peers (Zostera.octets_of_public public) with
   | None -> `Reject
   | Some entry ->
-    let fresh = match entry.last with
-      | None -> true
-      | Some last -> Zostera.newer timestamp last in
-    if not fresh then `Reject
-    else begin entry.last <- Some timestamp; `Accept entry.psk end
+    let fresh timestamp =
+      let ok = match entry.last with
+        | None -> true
+        | Some last -> Zostera.newer timestamp last in
+      if ok then entry.last <- Some timestamp;
+      ok in
+    `Accept (entry.shared, entry.psk, fresh)
 
 let run_without_cookie () =
   (* we need a monotonic clock *)
@@ -26,19 +28,21 @@ let run_without_cookie () =
   (* initiate an identity for [i] *)
   let i = Zostera.gen () in
   (* pre-shared key *)
-  (* add the [i] identity on the [r] side with a preshared key [q] *)
   let q = Zostera.psk (String.make 32 '\x11') in
-  Hashtbl.replace peers (Zostera.octets_of_public (Zostera.public i))
-    { psk= Some q; last= None };
   (* initiate an identity for [r] *)
   let r = Zostera.gen () in
+  (* add the [i] identity on the [r] side with a preshared key [q] *)
+  let* shared = Zostera.shared r (Zostera.public i) in
+  Hashtbl.replace peers (Zostera.octets_of_public (Zostera.public i))
+    { shared; psk= Some q; last= None };
   let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
   let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
   let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
-  let* init0, msg1 = Zostera.step0 ~now i (Zostera.public r) in
+  let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
+  let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
-  let _mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 (Zostera.public r) msg1 in
+  let _mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
   (* transform the packet to a string, and we give the [mac1] *)
   let* (_0, msg1) =
     (* here, we decode the packet as [r] and get [msg1] *)
@@ -62,7 +66,7 @@ let run_without_cookie () =
     | Ok (`Msg2 (link, msg2)) -> Ok (link, msg2)
     | Error _ as err -> err in
   (* on the [i], we are able to create a session *)
-  let* session0 = Zostera.step2 ~psk:q ~now link msg2 i init0 in
+  let* session0 = Zostera.step2 ~now link msg2 i init0 in
   let { Zostera.send= _Ai; recv= _Bi } = Zostera.keys session0 in
   (* on the [r], we are able to create a session with [_0]/[peer0] *)
   let { Zostera.recv= _Ar; send= _Br } =
@@ -78,21 +82,24 @@ let run_with_cookie () =
   (* initiate an identity for [i] *)
   let i = Zostera.gen () in
   (* pre-shared key *)
-  (* add the [i] identity on the [r] side with a preshared key [q] *)
   let q = Zostera.psk (String.make 32 '\x11') in
-  Hashtbl.replace peers (Zostera.octets_of_public (Zostera.public i))
-    { psk= Some q; last= None };
   (* initiate an identity for [r] *)
   let r = Zostera.gen () in
+  (* add the [i] identity on the [r] side with a preshared key [q] *)
+  let* shared = Zostera.shared r (Zostera.public i) in
+  Hashtbl.replace peers (Zostera.octets_of_public (Zostera.public i))
+    { shared; psk= Some q; last= None };
   let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
   let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
   let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
-  let cookie_validator_for_i_from_r = Zostera.validator (Zostera.public r) in
+  let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
+  let cookie_validator_for_i_from_r = Zostera.validator rr in
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
-  let cookie_validator_for_r_from_i = Zostera.validator (Zostera.public i) in
-  let* init0, msg1 = Zostera.step0 ~now i (Zostera.public r) in
+  let* ri = Zostera.remote ~psk:q r (Zostera.public i) in
+  let cookie_validator_for_r_from_i = Zostera.validator ri in
+  let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
-  let mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 (Zostera.public r) msg1 in
+  let mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
   (* transform the packet to a string, and we give the [mac1] *)
   let* cookie =
     (* here, we decode the packet as [r] and get [msg1] *)
@@ -104,7 +111,7 @@ let run_with_cookie () =
   let* cookie =
     let uid = Zostera.uid_of_initiator init0 in
     Zostera.check_cookie_of_pkt cookie_validator_for_i_from_r ~now ~uid ~mac1 cookie in
-  let _mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 ~cookie (Zostera.public r) msg1 in
+  let _mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 ~cookie msg1 in
   let* (_0, msg1) =
     (* here, we decode the packet as [r] and get [msg1] *)
     (* [load = true] => [`Cookie _] *)
@@ -136,7 +143,7 @@ let run_with_cookie () =
   (* I mean, the whitepaper does not do a difference between initiator and receiver when
      it's about cookies. Both (peers) can send such packet. so [i] can also generate and
      send a cookie. *)
-  let* session0 = Zostera.step2 ~psk:q ~now link msg2 i init0 in
+  let* session0 = Zostera.step2 ~now link msg2 i init0 in
   let { Zostera.send= _Ai; recv= _Bi } = Zostera.keys session0 in
   (* on the [r], we are able to create a session with [_0]/[peer0] *)
   let { Zostera.recv= _Ar; send= _Br } =
