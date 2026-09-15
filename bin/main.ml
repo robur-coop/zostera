@@ -69,8 +69,8 @@ let run_without_cookie () =
   let* session0 = Zostera.step2 ~now link msg2 i init0 in
   let { Zostera.send= _Ai; recv= _Bi } = Zostera.keys session0 in
   (* on the [r], we are able to create a session with [_0]/[peer0] *)
+  let* session1 = Zostera.session_of_responder ~now _0 responder in
   let { Zostera.recv= _Ar; send= _Br } =
-    let session1 = Zostera.session_of_responder ~now _0 responder in
     Zostera.keys session1 in
   (* [i] and [r] shares keys *)
   if _Ai = _Ar && _Bi = _Br
@@ -139,8 +139,8 @@ let run_with_cookie () =
   let* session0 = Zostera.step2 ~now link msg2 i init0 in
   let { Zostera.send= _Ai; recv= _Bi } = Zostera.keys session0 in
   (* on the [r], we are able to create a session with [_0]/[peer0] *)
+  let* session1 = Zostera.session_of_responder ~now _0 responder in
   let { Zostera.recv= _Ar; send= _Br } =
-    let session1 = Zostera.session_of_responder ~now _0 responder in
     Zostera.keys session1 in
   (* [i] and [r] shares keys *)
   if _Ai = _Ar && _Bi = _Br

@@ -143,7 +143,7 @@ val session_of_responder :
      now:(unit -> int)
   -> uid
   -> (responder, confirmed) handshake
-  -> session
+  -> (session, [> error ]) result
 
 type keys = { send : string; recv : string }
 

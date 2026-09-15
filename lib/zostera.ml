@@ -172,11 +172,13 @@ type ('a, 'state) handshake =
     ; _Ci : string
     ; uid : uid
     ; remote : remote
+    ; consumed : bool Atomic.t
     ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> (initiator, 'state) handshake
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
     ; uid : uid
     ; remote : remote
+    ; consumed : bool Atomic.t
     ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, confirmed) handshake
 
 let uid_of_initiator (Initiator { uid; _ }) = uid
@@ -327,7 +329,7 @@ let step0 ?g ~now ((_, (_Si_pub, _)) : t)
   (* Hi := Hash(Hi || msg.timestamp) *)
   let _Hi = mix _Hi timestamp in
   let uid = uid ?g () in
-  Ok (Initiator { _Hi; _Ci; uid; remote; _Ei_priv }, (ephemeral, static, timestamp))
+  Ok (Initiator { _Hi; _Ci; uid; remote; consumed= Atomic.make false; _Ei_priv }, (ephemeral, static, timestamp))
 
 let pkt_of_initiator ~now (Initiator { uid; remote; _ }) (ephemeral, static, timestamp) =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
@@ -433,7 +435,7 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   (* Hr := Hash(Hr || msg.empty) *)
   let _Hr = mix _Hr empty in
   let uid = uid ?g () in
-  Ok (Responder { _Hr; _Cr; uid; remote; _Er_priv }, (ephemeral, empty))
+  Ok (Responder { _Hr; _Cr; uid; remote; consumed= Atomic.make false; _Er_priv }, (ephemeral, empty))
 
 let pkt_of_responder
   : type a. now:(unit -> int) -> (responder, a) handshake -> uid -> msg2 -> string
@@ -498,7 +500,9 @@ let session ~now ~role ~local ~remote _C =
   ; role; counter= 0L; window= Window.make (); confirmed= (role = Initiator) }
 
 let step2 ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _Si_pub)
-  (Initiator { _Ci; _Hi; uid; remote= { _Q; _ }; _Ei_priv } : (initiator, _) handshake) =
+  (Initiator { _Ci; _Hi; uid; remote= { _Q; _ }; consumed; _Ei_priv } : (initiator, _) handshake) =
+  let* () = guard ~err:(msgf "Handshake already consumed") @@ fun () ->
+    Atomic.compare_and_set consumed false true in
   let* () = guard ~err:(msgf "Unexpected receiver UID") @@ fun () ->
     receiver = uid in
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
@@ -514,8 +518,10 @@ let step2 ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _Si_pub)
   Ok (session ~now ~role:Initiator ~local:receiver ~remote:sender _Ci)
 
 let session_of_responder ~now remote
-  (Responder { _Cr; uid; _ } : (responder, _) handshake) =
-  session ~now ~role:Responder ~local:uid ~remote _Cr
+  (Responder { _Cr; uid; consumed; _ } : (responder, _) handshake) =
+  let* () = guard ~err:(msgf "Handshake already consumed") @@ fun () ->
+    Atomic.compare_and_set consumed false true in
+  Ok (session ~now ~role:Responder ~local:uid ~remote _Cr)
 
 let keys { keys; _ } = keys
 
