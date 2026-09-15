@@ -161,3 +161,9 @@ val session_of_responder :
 type keys = { send : string; recv : string }
 
 val keys : session -> keys
+
+(**/*)
+
+val tai64n : now:(unit -> int) -> string
+(** See https://cr.yp.to/libtai/tai64.html.
+    We have 10 years before the world ends. *)

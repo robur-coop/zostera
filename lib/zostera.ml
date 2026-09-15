@@ -202,12 +202,16 @@ let mix hash str =
 
 type timestamp = string
 
+let whitener_mask = Int32.sub 0x1000000l 1l
+
 let tai64n ~now =
   let nsecs = Int64.of_int (now ()) in
   let secs = Int64.div nsecs 1_000_000_000L in
   let tai = Int64.rem nsecs 1_000_000_000L in
   let secs = Int64.add secs 0x400000000000000AL in
-  let tai = Int64.to_int32 tai in
+  (* NOTE(dinosaure): as [wireguard-go], we round down the nanoseconds to
+     reduce the chance of leaking timing info. *)
+  let tai = Int32.logand (Int64.to_int32 tai) (Int32.lognot whitener_mask) in
   let buf = Bytes.create 12 in
   Bytes.set_int64_be buf 0 secs;
   Bytes.set_int32_be buf 8 tai;
