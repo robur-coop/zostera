@@ -131,7 +131,7 @@ val msg1_of_string :
   -> load:bool
   -> peer:Addr.t
   -> string
-  -> ([ `Msg1 of uid * msg1 | `Cookie of string ], [> `Msg of string ]) result
+  -> ([ `Msg1 of msg1 | `Cookie of string ], [> `Msg of string ]) result
 (** [msg1_of_string ?g bakery limiter ~now ~load ~peer pkt] tries to parse the
     given packet [pkt] from the given [peer] and extract a {!type:msg1} value.
     If the user is under an heavy load, [load] can be set to [true] and
@@ -148,15 +148,20 @@ val step1 :
   -> msg1
   -> t
   -> ((responder, confirmed) handshake * msg2, [> error ]) result
+(** [step1 ?g ~peer msg1 identity] returns a new handshake state and a
+    {!type:msg2} value. [peer] lets the user to accept or reject the
+    {i initiator}. When the user would like to accept a new {i initiator}, it
+    must return its {!type:remote} (its public key), the last time a handshake
+    operated with this {i initiator} and a function which is able to update
+    to last timestamp when this {i initiator} tried a handshake. *)
 
 val pkt_of_responder :
      now:(unit -> int)
   -> (responder, 'a) handshake
-  -> uid
   -> msg2
   -> string
-
-type link
+(** [pkt_of_responder ~now state uid msg2] returns a WireGuard packet which
+    should be send to the {i initiator}. *)
 
 val msg2_of_string :
      ?g:Mirage_crypto_rng.g
@@ -166,13 +171,14 @@ val msg2_of_string :
   -> load:bool
   -> peer:Addr.t
   -> string
-  -> ([ `Msg2 of link * msg2 | `Cookie of string ], [> `Msg of string ]) result
+  -> ([ `Msg2 of msg2 | `Cookie of string ], [> `Msg of string ]) result
+(** [msg2_of_string ?g bakery limiter ~now ~load ~peer pkt] tries to parse the
+    given packet [pkt] from the given [peer] and extract a {!type:msg2} value. *)
 
 type ('a, 'state) session
 
 val step2 :
      now:(unit -> int)
-  -> link
   -> msg2
   -> t
   -> (initiator, pending) handshake
@@ -180,7 +186,6 @@ val step2 :
 
 val session_of_responder :
      now:(unit -> int)
-  -> uid
   -> (responder, confirmed) handshake
   -> ((responder, pending) session, [> error ]) result
 

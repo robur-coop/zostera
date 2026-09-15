@@ -155,8 +155,9 @@ type ('role, 'state) handshake =
     ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> (initiator, pending) handshake
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
-    ; uid : uid
+    ; remote_uid : uid
     ; remote : remote
+    ; uid : uid
     ; consumed : bool Atomic.t
     ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, confirmed) handshake
 
@@ -298,7 +299,11 @@ let remote ?psk:(_Q= _Q) (_S_priv, _) ((octets, mac1_key) as public : public) =
 let remote_of_octets ?psk t str = remote ?psk t (public_of_octets str)
 let octets_of_remote { octets; _ } = octets
 
-type msg1 = string * string * string
+type msg1 =
+  { sender : uid
+  ; ephemeral : string
+  ; static : string
+  ; timestamp : string }
 
 let step0 ?g ~now ((_, (_Si_pub, _)) : t)
   (({ octets= _Sr_pub; _SS; _ } as remote) : remote) =
@@ -333,9 +338,10 @@ let step0 ?g ~now ((_, (_Si_pub, _)) : t)
   (* Hi := Hash(Hi || msg.timestamp) *)
   let _Hi = mix _Hi timestamp in
   let uid = uid ?g () in
-  Ok (Initiator { _Hi; _Ci; uid; remote; consumed= Atomic.make false; _Ei_priv }, (ephemeral, static, timestamp))
+  let msg1 = { sender= uid; ephemeral; static; timestamp } in
+  Ok (Initiator { _Hi; _Ci; uid; remote; consumed= Atomic.make false; _Ei_priv }, msg1)
 
-let pkt_of_initiator ~now (Initiator { uid; remote; _ }) (ephemeral, static, timestamp) =
+let pkt_of_initiator ~now (Initiator { uid; remote; _ }) { ephemeral; static; timestamp; _ } =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 1;
   Bytes.set_int32_le pkt 4 uid;
@@ -389,11 +395,15 @@ let msg1_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
     let ephemeral = String.sub pkt 8 32 in
     let static = String.sub pkt 40 48 in
     let timestamp = String.sub pkt 88 28 in
-    Ok (`Msg1 (uid, (ephemeral, static, timestamp)))
+    Ok (`Msg1 { sender= uid; ephemeral; static; timestamp; })
 
-type msg2 = string * string
+type msg2 =
+  { sender : uid
+  ; receiver : uid
+  ; ephemeral : string
+  ; empty : string }
 
-let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
+let step1 ?g ~peer { sender= remote_uid; ephemeral= _Ei_pub; static; timestamp; } (_Sr_priv, (_Sr_pub, _)) =
   let open Digestif in
   let _Cr = BLAKE2S.digest_string "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s" in
   let _Hr = mix _Cr "WireGuard v1 zx2c4 Jason@zx2c4.com" in
@@ -443,21 +453,21 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   (* Hr := Hash(Hr || msg.empty) *)
   let _Hr = mix _Hr empty in
   let uid = uid ?g () in
-  Ok (Responder { _Hr; _Cr; uid; remote; consumed= Atomic.make false; _Er_priv }, (ephemeral, empty))
+  let msg2 = { sender= uid; receiver= remote_uid; ephemeral; empty } in
+  Ok (Responder { _Hr; _Cr; uid; remote_uid; remote; consumed= Atomic.make false; _Er_priv }, msg2)
 
 let pkt_of_responder
-  : type a. now:(unit -> int) -> (responder, a) handshake -> uid -> msg2 -> string
-  = fun ~now (Responder { uid= uid0; remote; _ }) uid1 (ephemeral, empty) ->
+  : type a. now:(unit -> int) -> (responder, a) handshake -> msg2 -> string
+  = fun ~now (Responder { remote; _ }) { sender; receiver; ephemeral; empty; _ } ->
+  (* TODO(dinosaure): check uids from our [state] and [msg2]. *)
   let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 2;
-  Bytes.set_int32_le pkt 4 uid0;
-  Bytes.set_int32_le pkt 8 uid1;
+  Bytes.set_int32_le pkt 4 sender;
+  Bytes.set_int32_le pkt 8 receiver;
   Bytes.blit_string ephemeral 0 pkt 12 32;
   Bytes.blit_string empty 0 pkt 44 16;
   add_macs ~now remote ~off:60 pkt;
   Bytes.unsafe_to_string pkt
-
-type link = { sender : uid; receiver : uid }
 
 let msg2_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg2 packet") @@ fun () ->
@@ -472,7 +482,7 @@ let msg2_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
     let uid1 = String.get_int32_le pkt 8 in
     let ephemeral = String.sub pkt 12 32 in
     let empty = String.sub pkt 44 16 in
-    Ok (`Msg2 ({ sender= uid0; receiver= uid1 }, (ephemeral, empty)))
+    Ok (`Msg2 ({ sender= uid0; receiver= uid1; ephemeral; empty }))
 
 type role =
   | Initiator
@@ -507,10 +517,10 @@ let session ~now ~role ~local ~remote _C =
   { local; remote; keys; birth= now ()
   ; role; counter= 0L; window= Window.make (); confirmed= (role = Initiator) }
 
-let step2 ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _Si_pub)
+let step2 ~now { sender; receiver; ephemeral= _Er_pub; empty } (_Si_priv, _Si_pub)
   (Initiator { _Ci; _Hi; uid; remote= { _Q; _ }; consumed; _Ei_priv } : (initiator, _) handshake) =
   let* () = guard ~err:(msgf "Handshake already consumed") @@ fun () ->
-    Atomic.compare_and_set consumed false true in
+    not (Atomic.get consumed) in
   let* () = guard ~err:(msgf "Unexpected receiver UID") @@ fun () ->
     receiver = uid in
   let _Ci = kdf1 ~ck:_Ci ~ikm:_Er_pub in
@@ -523,13 +533,15 @@ let step2 ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _Si_pub)
   let _Hi = mix _Hi _t in
   let* _ = decrypt _k empty _Hi in
   (* let _Hi = mix _Hi empty in *)
-  Ok (session ~now ~role:Initiator ~local:receiver ~remote:sender _Ci)
-
-let session_of_responder ~now remote
-  (Responder { _Cr; uid; consumed; _ } : (responder, _) handshake) =
   let* () = guard ~err:(msgf "Handshake already consumed") @@ fun () ->
     Atomic.compare_and_set consumed false true in
-  Ok (session ~now ~role:Responder ~local:uid ~remote _Cr)
+  Ok (session ~now ~role:Initiator ~local:receiver ~remote:sender _Ci)
+
+let session_of_responder ~now
+  (Responder { _Cr; uid; remote_uid; consumed; _ } : (responder, _) handshake) =
+  let* () = guard ~err:(msgf "Handshake already consumed") @@ fun () ->
+    Atomic.compare_and_set consumed false true in
+  Ok (session ~now ~role:Responder ~local:uid ~remote:remote_uid _Cr)
 
 let confirm _ = assert false
 
