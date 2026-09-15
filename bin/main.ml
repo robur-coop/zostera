@@ -38,7 +38,7 @@ let run_without_cookie () =
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
   let* init0, msg1 = Zostera.step0 ~now i (Zostera.public r) in
   (* generate the first packet [msg1] *)
-  let _mac1, pkt1 = Zostera.pkt_of_initiator init0 (Zostera.public r) msg1 in
+  let _mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 (Zostera.public r) msg1 in
   (* transform the packet to a string, and we give the [mac1] *)
   let* (_0, msg1) =
     (* here, we decode the packet as [r] and get [msg1] *)
@@ -53,7 +53,7 @@ let run_without_cookie () =
      an authorized peer *)
   let* responder, msg2 = Zostera.step1 msg1 ~peer:authorize r in
   (* transform [msg2] to a string *)
-  let _mac1, pkt = Zostera.pkt_of_responder responder _0 (Zostera.public i) msg2 in
+  let _mac1, pkt = Zostera.pkt_of_responder ~now responder _0 (Zostera.public i) msg2 in
   let* link, msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)
@@ -92,7 +92,7 @@ let run_with_cookie () =
   let cookie_validator_for_r_from_i = Zostera.validator (Zostera.public i) in
   let* init0, msg1 = Zostera.step0 ~now i (Zostera.public r) in
   (* generate the first packet [msg1] *)
-  let mac1, pkt1 = Zostera.pkt_of_initiator init0 (Zostera.public r) msg1 in
+  let mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 (Zostera.public r) msg1 in
   (* transform the packet to a string, and we give the [mac1] *)
   let* cookie =
     (* here, we decode the packet as [r] and get [msg1] *)
@@ -104,7 +104,7 @@ let run_with_cookie () =
   let* cookie =
     let uid = Zostera.uid_of_initiator init0 in
     Zostera.check_cookie_of_pkt cookie_validator_for_i_from_r ~now ~uid ~mac1 cookie in
-  let _mac1, pkt1 = Zostera.pkt_of_initiator init0 ~cookie (Zostera.public r) msg1 in
+  let _mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 ~cookie (Zostera.public r) msg1 in
   let* (_0, msg1) =
     (* here, we decode the packet as [r] and get [msg1] *)
     (* [load = true] => [`Cookie _] *)
@@ -118,7 +118,7 @@ let run_with_cookie () =
      an authorized peer *)
   let* responder, msg2 = Zostera.step1 msg1 ~peer:authorize r in
   (* transform [msg2] to a string *)
-  let _mac1, pkt = Zostera.pkt_of_responder responder _0 (Zostera.public i) msg2 in
+  let _mac1, pkt = Zostera.pkt_of_responder ~now responder _0 (Zostera.public i) msg2 in
   let* link, msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)

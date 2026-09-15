@@ -266,11 +266,11 @@ let decrypt _k ?(counter= 0L) txt _Hr =
 
 let empty = String.make 16 '\x00'
 
-let mac2 ?(off= 0) pkt = function
-  | None -> Bytes.blit_string empty 0 pkt off 16
-  | Some { cookie; _ } -> (* TODO(dinosaure): expiration *)
+let mac2 ~now ?(off= 0) pkt = function
+  | Some { cookie; birth } when now () < birth + _COOKIE_LIFETIME ->
     let mac2 = _mac ~key:cookie (Bytes.unsafe_to_string pkt) ~off:0 ~len:off in
     Bytes.blit_string mac2 0 pkt off 16
+  | _ -> Bytes.blit_string empty 0 pkt off 16
 
 type msg1 = string * string * string and mac1 = string
 
@@ -308,7 +308,7 @@ let step0 ?g ~now (_Si_priv, (_Si_pub, _)) (_Sr_pub, _) =
   let uid = uid ?g () in
   Ok (Initiator { _Hi; _Ci; uid; _Ei_priv }, (ephemeral, static, timestamp))
 
-let pkt_of_initiator (Initiator { uid; _ }) (_, _Kr) ?cookie (ephemeral, static, timestamp) =
+let pkt_of_initiator ~now (Initiator { uid; _ }) (_, _Kr) ?cookie (ephemeral, static, timestamp) =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 1;
   Bytes.set_int32_le pkt 4 uid;
@@ -317,7 +317,7 @@ let pkt_of_initiator (Initiator { uid; _ }) (_, _Kr) ?cookie (ephemeral, static,
   Bytes.blit_string timestamp 0 pkt 88 28;
   let mac1 = _mac ~key:_Kr (Bytes.unsafe_to_string pkt) ~off:0 ~len:116 in
   Bytes.blit_string mac1 0 pkt 116 16;
-  mac2 ~off:132 pkt cookie;
+  mac2 ~now ~off:132 pkt cookie;
   (mac1, Bytes.unsafe_to_string pkt)
 
 let tau cookie_generator ~now addr =
@@ -326,7 +326,7 @@ let tau cookie_generator ~now addr =
 let verify_mac ~key ~off pkt =
   let expect = _mac ~key pkt ~off:0 ~len:off in
   let have = String.sub pkt off 16 in
-  String.equal expect have (* TODO(dinosaure): constant time *)
+  Eqaf.equal expect have
 
 let cookie ?g (cookie_generator : cookie_generator) ~tau str =
   let pkt = Bytes.make 64 '\000' in
@@ -377,11 +377,11 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   (* *)
   let _Cr = kdf1 ~ck:_Cr ~ikm:_Ei_pub in
   let _Hr = mix _Hr _Ei_pub in
-  let* _SE = dh _Sr_priv _Ei_pub in
+  let* _SE = dh _Sr_priv _Ei_pub in (* _SE *)
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SE in
   let* _Si_pub = decrypt _k static _Hr in
   let _Hr = mix _Hr static in
-  let* _SS = dh _Sr_priv _Si_pub in
+  let* _SS = dh _Sr_priv _Si_pub in (* _SS *)
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SS in
   let* _t = decrypt _k timestamp _Hr in
   let _Hr = mix _Hr timestamp in
@@ -415,8 +415,8 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
 Ok (Responder { _Hr; _Cr; uid; _Er_priv }, (ephemeral, empty))
 
 let pkt_of_responder
-  : type a. (responder, a) handshake -> uid -> public -> ?cookie:cookie -> msg2 -> mac1 * string
-  = fun (Responder { uid= uid0; _ }) uid1 (_, _Ki) ?cookie (ephemeral, empty) ->
+  : type a. now:(unit -> int) -> (responder, a) handshake -> uid -> public -> ?cookie:cookie -> msg2 -> mac1 * string
+  = fun ~now (Responder { uid= uid0; _ }) uid1 (_, _Ki) ?cookie (ephemeral, empty) ->
   let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 2;
   Bytes.set_int32_le pkt 4 uid0;
@@ -425,7 +425,7 @@ let pkt_of_responder
   Bytes.blit_string empty 0 pkt 44 16;
   let mac1 = _mac ~key:_Ki (Bytes.unsafe_to_string pkt) ~off:0 ~len:60 in
   Bytes.blit_string mac1 0 pkt 60 16;
-  mac2 ~off:76 pkt cookie;
+  mac2 ~now ~off:76 pkt cookie;
   (mac1, Bytes.unsafe_to_string pkt)
 
 type link = { sender : uid; receiver : uid }
@@ -492,7 +492,7 @@ let step2 ?psk:(_Q= _Q) ~now { sender; receiver } (_Er_pub, empty) (_Si_priv, _S
   let _Hi = mix _Hi _t in
   let* _ = decrypt _k empty _Hi in
   (* let _Hi = mix _Hi empty in *)
-  Ok (session ~now ~role:Initiator ~local:sender ~remote:receiver _Ci)
+  Ok (session ~now ~role:Initiator ~local:receiver ~remote:sender _Ci)
 
 let session_of_responder ~now remote
   (Responder { _Cr; uid; _ } : (responder, _) handshake) =

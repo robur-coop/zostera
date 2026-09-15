@@ -96,7 +96,8 @@ val step0 :
   -> ((initiator, pending) handshake * msg1, [> error ]) result
 
 val pkt_of_initiator :
-     (initiator, pending) handshake
+     now:(unit -> int)
+  -> (initiator, pending) handshake
   -> public
   -> ?cookie:cookie
   -> msg1
@@ -122,7 +123,8 @@ val step1 :
   -> ((responder, confirmed) handshake * msg2, [> error ]) result
 
 val pkt_of_responder :
-     (responder, 'a) handshake
+     now:(unit -> int)
+  -> (responder, 'a) handshake
   -> uid
   -> public
   -> ?cookie:cookie
