@@ -10,6 +10,7 @@ type error = [ `Msg of string | `Invalid_cookie | Mirage_crypto_ec.error ]
     (drop packets and cancel handshakes). *)
 
 val pp_error : error Fmt.t
+(** Pretty printer for {!type:error} values. *)
 
 type uid = private int32
 
@@ -19,11 +20,11 @@ type psk
 
 val psk : string -> psk
 
-(** {1 Identities.} *)
+(** {2 Identity.} *)
 
 type t
-(** A local static identity: an X25519 secret with its public part and its
-    precomputed {i mac1}. This is what a Wireguard {i node} {e is}. *)
+(** A local static identity: an X25519 secret with its public part and some 
+    precomputed values. *)
 
 type public
 (** A static public key and its precomputed {i mac1}. *)
@@ -45,14 +46,35 @@ val octets_of_public : public -> string
 val public : t -> public
 (** [public t] is the public key from the given identity [t]. *)
 
+(** {2 Remote identity.} *)
+
 type remote
+(** A remote static identity: an X25519 public and some precomputed values with
+    the local identity we use. *)
 
 val remote : ?psk:psk -> t -> public -> (remote, [> error ]) result
-val remote_of_octets : ?psk:psk -> t -> string -> (remote, [> error ]) result
-val octets_of_remote : remote -> string
-val consume_cookie : remote -> now:(unit -> int) -> uid:uid -> string -> (unit, [> error ]) result
+(** [remote ?psk my_own_identity public] returns a remote identity according to
+    its public key and our identity. *)
 
-(** {2 Cookies.} *)
+val remote_of_octets : ?psk:psk -> t -> string -> (remote, [> error ]) result
+(** [remote_of_octets ?psk my_own_identity str] returns a remote identity
+    according to its public key in the serialized form and our identity. *)
+
+val octets_of_remote : remote -> string
+(** [octets_of_remote remote] returns the serialized form of the remote
+    identity's public key. *)
+
+val consume_cookie :
+     remote
+  -> now:(unit -> int)
+  -> uid:uid
+  -> string
+  -> (unit, [> error ]) result
+(** [consume_cookie remote ~now ~uid pkt] validates the received cookie from
+    the given [remote] (with its [uid] according to the current handshake, see
+    {!val:uid_of_initiator}). *)
+
+(** {2 Bakery of cookies.} *)
 
 module Bakery : sig
   type identity = t
@@ -65,8 +87,10 @@ module Addr = Addr
 module Limiter = Limiter
 
 type timestamp
+(** Type of timestamps. *)
 
 val newer : timestamp -> timestamp -> bool
+(** [newer t0 t1] returns [true] if [t0 < t1]. Otherwise, it returns [false]. *)
 
 type initiator
 type responder
@@ -74,11 +98,13 @@ type responder
 type pending
 type confirmed
 
-type ('a, 'state) handshake
+type ('role, 'state) handshake
 
 val uid_of_initiator : (initiator, pending) handshake -> uid
 
 type msg1
+(** Type of the first message that an {i initiator} should send to the
+    {i responder}. *)
 
 val step0 :
      ?g:Mirage_crypto_rng.g
@@ -86,12 +112,16 @@ val step0 :
   -> t
   -> remote
   -> ((initiator, pending) handshake * msg1, [> error ]) result
+(** [step0 ?g ~now identity remote] generates a new handshake state and a
+    {!type:msg1} that's the user can send to the {i responder}. *)
 
 val pkt_of_initiator :
      now:(unit -> int)
   -> (initiator, pending) handshake
   -> msg1
   -> string
+(** [pkt_of_initiator ~now state msg1] returns a WireGuard packet which should
+    be send to the {i responder}. *)
 
 val msg1_of_string :
      ?g:Mirage_crypto_rng.g
@@ -102,12 +132,18 @@ val msg1_of_string :
   -> peer:Addr.t
   -> string
   -> ([ `Msg1 of uid * msg1 | `Cookie of string ], [> `Msg of string ]) result
+(** [msg1_of_string ?g bakery limiter ~now ~load ~peer pkt] tries to parse the
+    given packet [pkt] from the given [peer] and extract a {!type:msg1} value.
+    If the user is under an heavy load, [load] can be set to [true] and
+    [msg1_of_string] generates a cookie to send back to the given [peer]. *)
 
 type msg2
+(** Type of the second message that an {i responder} should send back to the
+    {i initiator}. *)
 
 val step1 :
      ?g:Mirage_crypto_rng.g
-  -> peer:(public -> [ `Accept of remote * (timestamp -> bool)
+  -> peer:(public -> [ `Accept of remote * timestamp option * (timestamp -> unit)
                      | `Reject ])
   -> msg1
   -> t

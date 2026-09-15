@@ -406,8 +406,8 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SE in
   let* _Si_pub = decrypt _k static _Hr in
   let _Hr = mix _Hr static in
-  let* remote, fresh = match peer (public_of_octets _Si_pub) with
-    | `Accept (remote, fresh) -> Ok (remote, fresh)
+  let* remote, _ts', set = match peer (public_of_octets _Si_pub) with
+    | `Accept (remote, _ts', set) -> Ok (remote, _ts', set)
     | `Reject -> error_msgf "Unknown peer" in
   let* () = guard ~err:(msgf "Mismatched peer") @@ fun () ->
     Eqaf.equal remote.octets _Si_pub in
@@ -415,7 +415,11 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SS in
   let* _ts = decrypt _k timestamp _Hr in
   let _Hr = mix _Hr timestamp in
-  let* () = guard ~err:(msgf "Replayed peer") @@ fun () -> fresh _ts in
+  let* () = guard ~err:(msgf "Replayed peer") @@ fun () ->
+    let ok = match _ts' with
+      | None -> true
+      | Some _ts' -> newer _ts _ts' in
+    if ok then set _ts; ok in
   (* (Er_priv, Er_pub) := DH-Generate() *)
   let _Er_priv, _Er_pub = Mirage_crypto_ec.X25519.gen_key ?g () in
   (* Cr := Kdf1(Cr, Er_pub) *)

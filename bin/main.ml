@@ -14,13 +14,8 @@ let authorize public =
   match Hashtbl.find_opt peers (Zostera.octets_of_public public) with
   | None -> `Reject
   | Some entry ->
-    let fresh timestamp =
-      let ok = match entry.last with
-        | None -> true
-        | Some last -> Zostera.newer timestamp last in
-      if ok then entry.last <- Some timestamp;
-      ok in
-    `Accept (entry.remote, fresh)
+    let set timestamp = entry.last <- Some timestamp in
+    `Accept (entry.remote, entry.last, set)
 
 let run_without_cookie () =
   (* we need a monotonic clock *)
