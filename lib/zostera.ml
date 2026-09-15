@@ -176,6 +176,7 @@ type ('a, 'state) handshake =
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
     ; uid : uid
+    ; remote : remote
     ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, confirmed) handshake
 
 let uid_of_initiator (Initiator { uid; _ }) = uid
@@ -291,15 +292,9 @@ let remote ?psk:(_Q= _Q) (_S_priv, _) ((octets, mac1_key) as public : public) =
 let remote_of_octets ?psk t str = remote ?psk t (public_of_octets str)
 let octets_of_remote { octets; _ } = octets
 
-(* shared *)
-
-type shared = string
-
-let shared (_S_priv, _) (_S_pub, _) = dh _S_priv _S_pub
-
 type msg1 = string * string * string
 
-let step0 ?g ~now ((_Si_priv, (_Si_pub, _)) : t)
+let step0 ?g ~now ((_, (_Si_pub, _)) : t)
   (({ octets= _Sr_pub; _SS; _ } as remote) : remote) =
   let open Digestif in
   (* Ci := Hash(Construction) *)
@@ -405,14 +400,16 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SE in
   let* _Si_pub = decrypt _k static _Hr in
   let _Hr = mix _Hr static in
-  let* _SS, _Q, fresh = match peer (public_of_octets _Si_pub) with
-    | `Accept (_SS, Some _Q, fresh) -> Ok (_SS, _Q, fresh)
-    | `Accept (_SS, None, fresh) -> Ok (_SS, _Q, fresh)
+  let* remote, fresh = match peer (public_of_octets _Si_pub) with
+    | `Accept (remote, fresh) -> Ok (remote, fresh)
     | `Reject -> error_msgf "Unknown peer" in
+  let* () = guard ~err:(msgf "Mismatched peer") @@ fun () ->
+    Eqaf.equal remote.octets _Si_pub in
+  let { _SS; _Q; _ } = remote in
   let _Cr, _k = kdf2 ~ck:_Cr ~ikm:_SS in
-  let* _t = decrypt _k timestamp _Hr in
+  let* _ts = decrypt _k timestamp _Hr in
   let _Hr = mix _Hr timestamp in
-  let* () = guard ~err:(msgf "Replayed peer") @@ fun () -> fresh _t in
+  let* () = guard ~err:(msgf "Replayed peer") @@ fun () -> fresh _ts in
   (* (Er_priv, Er_pub) := DH-Generate() *)
   let _Er_priv, _Er_pub = Mirage_crypto_ec.X25519.gen_key ?g () in
   (* Cr := Kdf1(Cr, Er_pub) *)
@@ -436,11 +433,11 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
   (* Hr := Hash(Hr || msg.empty) *)
   let _Hr = mix _Hr empty in
   let uid = uid ?g () in
-Ok (Responder { _Hr; _Cr; uid; _Er_priv }, (ephemeral, empty))
+  Ok (Responder { _Hr; _Cr; uid; remote; _Er_priv }, (ephemeral, empty))
 
 let pkt_of_responder
-  : type a. now:(unit -> int) -> (responder, a) handshake -> uid -> remote -> msg2 -> string
-  = fun ~now (Responder { uid= uid0; _ }) uid1 (remote : remote) (ephemeral, empty) ->
+  : type a. now:(unit -> int) -> (responder, a) handshake -> uid -> msg2 -> string
+  = fun ~now (Responder { uid= uid0; remote; _ }) uid1 (ephemeral, empty) ->
   let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 2;
   Bytes.set_int32_le pkt 4 uid0;

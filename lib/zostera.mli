@@ -52,12 +52,6 @@ val remote_of_octets : ?psk:psk -> t -> string -> (remote, [> error ]) result
 val octets_of_remote : remote -> string
 val consume_cookie : remote -> now:(unit -> int) -> uid:uid -> string -> (unit, [> error ]) result
 
-type shared
-
-val shared : t -> public -> (shared, [> error ]) result
-
-type mac1
-
 (** {2 Cookies.} *)
 
 type cookie_generator
@@ -110,7 +104,7 @@ type msg2
 
 val step1 :
      ?g:Mirage_crypto_rng.g
-  -> peer:(public -> [ `Accept of shared * psk option * (timestamp -> bool)
+  -> peer:(public -> [ `Accept of remote * (timestamp -> bool)
                      | `Reject ])
   -> msg1
   -> t
@@ -120,7 +114,6 @@ val pkt_of_responder :
      now:(unit -> int)
   -> (responder, 'a) handshake
   -> uid
-  -> remote
   -> msg2
   -> string
 

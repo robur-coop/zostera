@@ -6,7 +6,7 @@ let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
 let peer0 = Zostera.Addr.of_string_exn ~port:1234 "1.2.3.4:5678"
 let peer1 = Zostera.Addr.of_string_exn ~port:1234 "4.3.2.1:5678"
 
-type entry = { shared: Zostera.shared; psk: Zostera.psk option; mutable last : Zostera.timestamp option }
+type entry = { remote: Zostera.remote; mutable last : Zostera.timestamp option }
 let peers : (string, entry) Hashtbl.t = Hashtbl.create 0x10
 (* [peers] exists on the [r] side (it can exists on both side but may be empty on [i] side) *)
 
@@ -20,7 +20,7 @@ let authorize public =
         | Some last -> Zostera.newer timestamp last in
       if ok then entry.last <- Some timestamp;
       ok in
-    `Accept (entry.shared, entry.psk, fresh)
+    `Accept (entry.remote, fresh)
 
 let run_without_cookie () =
   (* we need a monotonic clock *)
@@ -32,15 +32,14 @@ let run_without_cookie () =
   (* initiate an identity for [r] *)
   let r = Zostera.gen () in
   (* add the [i] identity on the [r] side with a preshared key [q] *)
-  let* shared = Zostera.shared r (Zostera.public i) in
+  let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
+  let* ri = Zostera.remote ~psk:q r (Zostera.public i) in
   Hashtbl.replace peers (Zostera.octets_of_public (Zostera.public i))
-    { shared; psk= Some q; last= None };
+    { remote= ri; last= None };
   let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
   let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
   let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
-  let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
-  let* ri = Zostera.remote ~psk:q r (Zostera.public i) in
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
   let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
@@ -58,7 +57,7 @@ let run_without_cookie () =
      an authorized peer *)
   let* responder, msg2 = Zostera.step1 msg1 ~peer:authorize r in
   (* transform [msg2] to a string *)
-  let pkt = Zostera.pkt_of_responder ~now responder _0 ri msg2 in
+  let pkt = Zostera.pkt_of_responder ~now responder _0 msg2 in
   let* link, msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)
@@ -87,15 +86,14 @@ let run_with_cookie () =
   (* initiate an identity for [r] *)
   let r = Zostera.gen () in
   (* add the [i] identity on the [r] side with a preshared key [q] *)
-  let* shared = Zostera.shared r (Zostera.public i) in
+  let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
+  let* ri = Zostera.remote ~psk:q r (Zostera.public i) in
   Hashtbl.replace peers (Zostera.octets_of_public (Zostera.public i))
-    { shared; psk= Some q; last= None };
+    { remote= ri; last= None };
   let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
   let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
   let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
-  let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
-  let* ri = Zostera.remote ~psk:q r (Zostera.public i) in
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
   let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
@@ -120,7 +118,7 @@ let run_with_cookie () =
      an authorized peer *)
   let* responder, msg2 = Zostera.step1 msg1 ~peer:authorize r in
   (* transform [msg2] to a string *)
-  let pkt = Zostera.pkt_of_responder ~now responder _0 ri msg2 in
+  let pkt = Zostera.pkt_of_responder ~now responder _0 msg2 in
   let* link, msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)
