@@ -71,10 +71,10 @@ module B2s = struct
 end
 
 let _mac ~key ?(off= 0) ?len buf =
-  if String.length key > 32 then invalid_arg "Bruit._mac: invalid key";
+  if String.length key > 32 then invalid_arg "Zostera._mac: invalid key";
   let len = match len with Some len -> len | None -> String.length buf - off in
   if off < 0 || len < 0 || off + len > String.length buf
-  then invalid_arg "Bruit._mac: out of bounds";
+  then invalid_arg "Zostera._mac: out of bounds";
   let ctx = Bytes.create (B2s.ctx_size ()) in
   B2s.with_outlen_and_key ctx 16 key 0 (String.length key);
   B2s.update ctx buf off len;
@@ -96,33 +96,12 @@ let uid ?g () =
   let tmp = Mirage_crypto_rng.generate ?g 4 in
   String.get_int32_be tmp 0
 
-let _COOKIE_ROTATION = 120_000_000_000
 let _COOKIE_LIFETIME = 120_000_000_000
-
-type cookie_generator =
-  { mutable _Rm : string
-  ; mutable birth : int
-  ; mac1_key : string
-  ; cookie_key : string }
-
-let secret_of_cookie_generator cookie_generator ~now =
-  (* NOTE(dinosaure): it's lazy roundtrip of [_Rm] *)
-  let now = now () in
-  if now - cookie_generator.birth > _COOKIE_ROTATION then begin
-    cookie_generator._Rm <- Mirage_crypto_rng.generate 32;
-    cookie_generator.birth <- now
-  end;
-  cookie_generator._Rm
 
 let cookie_key_of_public (_S_pub, _) =
   let open Digestif in
   let _K = BLAKE2S.digest_string (strf "cookie--%s" _S_pub) in
   BLAKE2S.to_raw_string _K
-
-let cookie_generator ?g ~me:(_, ((_, mac1_key) as public)) () =
-  let cookie_key = cookie_key_of_public public in
-  let _Rm = Mirage_crypto_rng.generate ?g 32 in
-  { _Rm; birth= 0; mac1_key; cookie_key }
 
 type cookie = { cookie : string; birth : int }
 
@@ -167,13 +146,13 @@ type responder = Responder
 type pending = |
 type confirmed = |
 
-type ('a, 'state) handshake =
+type ('role, 'state) handshake =
   | Initiator : { _Hi : Digestif.BLAKE2S.t
     ; _Ci : string
     ; uid : uid
     ; remote : remote
     ; consumed : bool Atomic.t
-    ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> (initiator, 'state) handshake
+    ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> (initiator, pending) handshake
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
     ; uid : uid
@@ -186,7 +165,7 @@ let uid_of_initiator (Initiator { uid; _ }) = uid
 type psk = string
 
 let psk str =
-  if String.length str <> 32 then invalid_arg "Bruit.psk: invalid private shared key";
+  if String.length str <> 32 then invalid_arg "Zostera.psk: invalid private shared key";
   str
 
 let _Q = String.make 32 '\000'
@@ -194,6 +173,31 @@ let _Q = String.make 32 '\000'
 type secret = Mirage_crypto_ec.X25519.secret
 type public = string * string
 type t = secret * public
+
+module Bakery = struct
+  type identity = t
+  type t =
+    { mutable _Rm : string
+    ; mutable birth : int
+    ; mac1_key : string
+    ; cookie_key : string }
+  
+  let _COOKIE_ROTATION = 120_000_000_000
+  
+  let secret t ~now =
+    (* NOTE(dinosaure): it's lazy roundtrip of [_Rm] *)
+    let now = now () in
+    if now - t.birth > _COOKIE_ROTATION then begin
+      t._Rm <- Mirage_crypto_rng.generate 32;
+      t.birth <- now
+    end;
+    t._Rm
+  
+  let create ?g ~me:(_, ((_, mac1_key) as public)) () =
+    let cookie_key = cookie_key_of_public public in
+    let _Rm = Mirage_crypto_rng.generate ?g 32 in
+    { _Rm; birth= 0; mac1_key; cookie_key }
+end
 
 let public (_, public) = public
 
@@ -205,7 +209,7 @@ let gen ?g () : secret * public =
   (secret, (public, _K))
 
 let public_of_octets str =
-  if String.length str <> 32 then invalid_arg "Bruit.public_of_octets: invalid public key";
+  if String.length str <> 32 then invalid_arg "Zostera.public_of_octets: invalid public key";
   let open Digestif in
   let _K = BLAKE2S.digest_string (strf "mac1----%s" str) in
   let _K = BLAKE2S.to_raw_string _K in
@@ -342,14 +346,14 @@ let pkt_of_initiator ~now (Initiator { uid; remote; _ }) (ephemeral, static, tim
   Bytes.unsafe_to_string pkt
 
 let tau cookie_generator ~now addr =
-  _mac ~key:(secret_of_cookie_generator cookie_generator ~now) (Addr.to_octets addr)
+  _mac ~key:(Bakery.secret cookie_generator ~now) (Addr.to_octets addr)
 
 let verify_mac ~key ~off pkt =
   let expect = _mac ~key pkt ~off:0 ~len:off in
   let have = String.sub pkt off 16 in
   Eqaf.equal expect have
 
-let cookie ?g (cookie_generator : cookie_generator) ~tau str =
+let cookie ?g (cookie_generator : Bakery.t) ~tau str =
   let pkt = Bytes.make 64 '\000' in
   Bytes.set_uint8 pkt 0 3;
   Bytes.blit_string str 4 pkt 4 4;
@@ -360,7 +364,7 @@ let cookie ?g (cookie_generator : cookie_generator) ~tau str =
   Bytes.blit_string s 0 pkt 32 32;
   Bytes.unsafe_to_string pkt
 
-let defend ?g (cookie_generator : cookie_generator) limiter ~now ~load ~peer ~off pkt =
+let defend ?g (cookie_generator : Bakery.t) limiter ~now ~load ~peer ~off pkt =
   let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
     verify_mac ~key:cookie_generator.mac1_key ~off pkt in
   if not load then Ok `Ok
@@ -482,7 +486,7 @@ end
 
 type window = Window.t
 
-type session =
+type ('role, 'state) session =
   { local : uid
   ; remote : uid
   ; keys : keys
@@ -522,6 +526,8 @@ let session_of_responder ~now remote
   let* () = guard ~err:(msgf "Handshake already consumed") @@ fun () ->
     Atomic.compare_and_set consumed false true in
   Ok (session ~now ~role:Responder ~local:uid ~remote _Cr)
+
+let confirm _ = assert false
 
 let keys { keys; _ } = keys
 

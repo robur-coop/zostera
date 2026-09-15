@@ -38,8 +38,8 @@ let run_without_cookie () =
     { remote= ri; last= None };
   let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
   let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
-  let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
-  let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
+  let cookie_generator_i = Zostera.Bakery.create ~me:i () in (* cookies generator for [i] *)
+  let cookie_generator_r = Zostera.Bakery.create ~me:r () in (* cookies generator for [r] *)
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
   let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
@@ -92,8 +92,8 @@ let run_with_cookie () =
     { remote= ri; last= None };
   let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
   let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
-  let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
-  let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
+  let cookie_generator_i = Zostera.Bakery.create ~me:i () in (* cookies generator for [i] *)
+  let cookie_generator_r = Zostera.Bakery.create ~me:r () in (* cookies generator for [r] *)
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
   let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in

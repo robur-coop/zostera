@@ -54,9 +54,12 @@ val consume_cookie : remote -> now:(unit -> int) -> uid:uid -> string -> (unit, 
 
 (** {2 Cookies.} *)
 
-type cookie_generator
+module Bakery : sig
+  type identity = t
+  type t
 
-val cookie_generator : ?g:Mirage_crypto_rng.g -> me:t -> unit -> cookie_generator
+  val create : ?g:Mirage_crypto_rng.g -> me:identity -> unit -> t
+end
 
 module Addr = Addr
 module Limiter = Limiter
@@ -92,7 +95,7 @@ val pkt_of_initiator :
 
 val msg1_of_string :
      ?g:Mirage_crypto_rng.g
-  -> cookie_generator
+  -> Bakery.t
   -> Limiter.t
   -> now:(unit -> int)
   -> load:bool
@@ -121,7 +124,7 @@ type link
 
 val msg2_of_string :
      ?g:Mirage_crypto_rng.g
-  -> cookie_generator
+  -> Bakery.t
   -> Limiter.t
   -> now:(unit -> int)
   -> load:bool
@@ -129,7 +132,7 @@ val msg2_of_string :
   -> string
   -> ([ `Msg2 of link * msg2 | `Cookie of string ], [> `Msg of string ]) result
 
-type session
+type ('a, 'state) session
 
 val step2 :
      now:(unit -> int)
@@ -137,17 +140,19 @@ val step2 :
   -> msg2
   -> t
   -> (initiator, pending) handshake
-  -> (session, [> error ]) result
+  -> ((initiator, confirmed) session, [> error ]) result
 
 val session_of_responder :
      now:(unit -> int)
   -> uid
   -> (responder, confirmed) handshake
-  -> (session, [> error ]) result
+  -> ((responder, pending) session, [> error ]) result
+
+val confirm : (responder, pending) session -> string -> ((responder, confirmed) session, [> error ]) result
 
 type keys = { send : string; recv : string }
 
-val keys : session -> keys
+val keys : ('role, 'state) session -> keys
 
 (**/*)
 
