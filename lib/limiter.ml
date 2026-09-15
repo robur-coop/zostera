@@ -1,3 +1,5 @@
+(* NOTE(dinosaure): see [ratelimiter.go] *)
+
 type entry = { mutable tokens : float; mutable last : int }
 type t = { tbl: (string, entry) Hashtbl.t; mutable gc : int }
 
