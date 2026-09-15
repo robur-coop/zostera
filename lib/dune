@@ -1,3 +1,4 @@
 (library
  (name zostera)
+ (modules zostera limiter addr)
  (libraries ipaddr digestif.c ohex mirage-crypto-rng.unix fmt mirage-crypto-ec kdf.hkdf))

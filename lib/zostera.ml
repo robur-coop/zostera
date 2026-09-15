@@ -53,71 +53,8 @@ let xaead_open ~key ~nonce ?adata msg =
   let nonce = "\x00\x00\x00\x00" ^ String.sub nonce 16 8 in
   Mirage_crypto.Chacha20.authenticate_decrypt ~key ~nonce ?adata msg
 
-type addr = { ipaddr : Ipaddr.t; port : int }
-
-let addr ipaddr ~port = { ipaddr; port }
-
-let addr_of_string str ~port =
-  let* ipaddr, port = Ipaddr.with_port_of_string ~default:port str in
-  Ok { ipaddr; port }
-
-let addr_of_string_exn str ~port =
-  match Ipaddr.with_port_of_string ~default:port str with
-  | Ok (ipaddr, port) -> { ipaddr; port }
-  | Error _ -> invalid_arg "Bruit.addr_of_string_exn"
-
-let octets_of_addr { ipaddr; port } =
-  let buf = Bytes.create 2 in
-  Bytes.set_uint16_be buf 0 port;
-  let port = Bytes.unsafe_to_string buf in
-  Ipaddr.to_octets ipaddr ^ port
-
-module Limiter = struct
-  type entry = { mutable tokens : float; mutable last : int }
-  type t = { tbl: (string, entry) Hashtbl.t; mutable gc : int }
-
-  let _GC_INTERVAL = 1_000_000_000 (* 1s *)
-  let _ENTRY_TTL = 1_000_000_000 (* 1s *)
-  let _PACKETS_PER_SECOND = 20.
-
-  (* NOTE(dinosaure): here, we accept a burst of 5 packets. *)
-
-  let _BURST = 5.
-  let _MAX_ENTRIES = 8192
-
-  let gc t ~now:ts =
-    if ts - t.gc >= _GC_INTERVAL then begin
-      t.gc <- ts;
-      let fn k entry acc =
-        if ts - entry.last > _ENTRY_TTL
-        then k :: acc else acc in
-      let stale = Hashtbl.fold fn t.tbl [] in
-      List.iter (Hashtbl.remove t.tbl) stale
-    end
-
-  let key = function
-    | Ipaddr.V4 v4 -> Ipaddr.V4.to_octets v4
-    | Ipaddr.V6 v6 -> String.sub (Ipaddr.V6.to_octets v6) 0 8
-
-  let allow t ~now { ipaddr; _ } =
-    let ts = now () in
-    gc t ~now:ts;
-    let key = key ipaddr in
-    match Hashtbl.find_opt t.tbl key with
-    | Some entry ->
-      let elapsed = float_of_int (ts - entry.last) /. 1e9 in
-      let tokens = entry.tokens +. elapsed *. _PACKETS_PER_SECOND in
-      let tokens = Float.min _BURST tokens in
-      entry.tokens <- tokens;
-      entry.last <- ts;
-      if entry.tokens >= 1.
-      then begin entry.tokens <- entry.tokens -. 1.; true end
-      else false
-    | None when Hashtbl.length t.tbl >= _MAX_ENTRIES -> false
-    | None ->
-      Hashtbl.replace t.tbl key { tokens= _BURST -. 1.; last= ts };
-      true
-end
+module Addr = Addr
+module Limiter = Limiter
 
 (* NOTE(dinosaure): [B2s] gives to us the real access to the BLAKE2S implementation
    just because [Digestif.Make_BLAKE2S] does not expose [Keyed]... *)
@@ -194,10 +131,6 @@ type validator =
 let validator public =
   let cookie_key = cookie_key_of_public public in
   { cookie_key; cookie= None }
-
-type limiter = Limiter.t
-
-let limiter () = { Limiter.tbl= Hashtbl.create 0x100; gc= 0 }
 
 type initiator = Initiator
 type responder = Responder
@@ -384,7 +317,7 @@ let pkt_of_initiator (Initiator { uid; _ }) (_, _Kr) ?cookie (ephemeral, static,
   (mac1, Bytes.unsafe_to_string pkt)
 
 let tau cookie_generator ~now addr =
-  _mac ~key:(secret_of_cookie_generator cookie_generator ~now) (octets_of_addr addr)
+  _mac ~key:(secret_of_cookie_generator cookie_generator ~now) (Addr.to_octets addr)
 
 let verify_mac ~key ~off pkt =
   let expect = _mac ~key pkt ~off:0 ~len:off in

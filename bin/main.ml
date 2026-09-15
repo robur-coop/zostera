@@ -3,8 +3,8 @@
 let ( let* ) = Result.bind
 let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
 
-let peer0 = Zostera.addr_of_string_exn ~port:1234 "1.2.3.4:5678"
-let peer1 = Zostera.addr_of_string_exn ~port:1234 "4.3.2.1:5678"
+let peer0 = Zostera.Addr.of_string_exn ~port:1234 "1.2.3.4:5678"
+let peer1 = Zostera.Addr.of_string_exn ~port:1234 "4.3.2.1:5678"
 
 type entry = { psk : Zostera.psk option; mutable last : Zostera.timestamp option }
 let peers : (string, entry) Hashtbl.t = Hashtbl.create 0x10
@@ -32,8 +32,8 @@ let run_without_cookie () =
     { psk= Some q; last= None };
   (* initiate an identity for [r] *)
   let r = Zostera.gen () in
-  let limiter_i = Zostera.limiter () in (* ratelimit on [i] *)
-  let limiter_r = Zostera.limiter () in (* ratelimit on [r] *)
+  let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
+  let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
   let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
   let* init0, msg1 = Zostera.step0 ~now i (Zostera.public r) in
@@ -84,8 +84,8 @@ let run_with_cookie () =
     { psk= Some q; last= None };
   (* initiate an identity for [r] *)
   let r = Zostera.gen () in
-  let limiter_i = Zostera.limiter () in (* ratelimit on [i] *)
-  let limiter_r = Zostera.limiter () in (* ratelimit on [r] *)
+  let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
+  let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
   let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
   let cookie_validator_for_i_from_r = Zostera.validator (Zostera.public r) in
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)

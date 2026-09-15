@@ -41,20 +41,6 @@ val octets_of_public : public -> string
 val public : t -> public
 (** [public t] is the public key from the given identity [t]. *)
 
-(** {1 Addresses.} *)
-
-type addr
-(** A source address: an IP and a port. Both parts matter:
-    - the cookie [tau] is bound to [ip || port] so that it cannot be reused
-      from elsewhere
-    - our rate {!type:limiter} keys on the {i prefix} only ([/32] for IPv4,
-      [/64] for IPv6 - so that a single IPv6 allocation cannot obtain 2^64
-      independent buckets) *)
-
-val addr : Ipaddr.t -> port:int -> addr
-val addr_of_string : string -> port:int -> (addr, [> `Msg of string ]) result
-val addr_of_string_exn : string -> port:int -> addr
-
 type mac1
 
 (** {2 Cookies.} *)
@@ -79,9 +65,8 @@ val check_cookie_of_pkt :
   -> string
   -> (cookie, [> error ]) result
 
-type limiter
-
-val limiter : unit -> limiter
+module Addr = Addr
+module Limiter = Limiter
 
 type timestamp
 
@@ -120,10 +105,10 @@ val pkt_of_initiator :
 val msg1_of_string :
      ?g:Mirage_crypto_rng.g
   -> cookie_generator
-  -> limiter
+  -> Limiter.t
   -> now:(unit -> int)
   -> load:bool
-  -> peer:addr
+  -> peer:Addr.t
   -> string
   -> ([ `Msg1 of uid * msg1 | `Cookie of string ], [> `Msg of string ]) result
 
@@ -149,10 +134,10 @@ type link
 val msg2_of_string :
      ?g:Mirage_crypto_rng.g
   -> cookie_generator
-  -> limiter
+  -> Limiter.t
   -> now:(unit -> int)
   -> load:bool
-  -> peer:addr
+  -> peer:Addr.t
   -> string
   -> ([ `Msg2 of link * msg2 | `Cookie of string ], [> `Msg of string ]) result
 
