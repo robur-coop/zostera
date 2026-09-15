@@ -40,15 +40,16 @@ let run_without_cookie () =
   let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
   let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
+  let* ri = Zostera.remote ~psk:q r (Zostera.public i) in
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
-  let _mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
+  let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
   (* transform the packet to a string, and we give the [mac1] *)
   let* (_0, msg1) =
     (* here, we decode the packet as [r] and get [msg1] *)
     (* [load = true] => [`Cookie _] *)
     match Zostera.msg1_of_string cookie_generator_r limiter_r ~now ~load:false ~peer:peer0 pkt1 with
-    | Ok `Cookie _ -> error_msgf "We would like to emit cookie"
+    | Ok `Cookie _ -> error_msgf "We would like to emit cookie (0)"
     | Ok (`Msg1 (uid, msg1)) -> Ok (uid, msg1)
     | Error _ as err -> err in
   (* here, we compute [msg1] and generate [msg2] *)
@@ -57,12 +58,12 @@ let run_without_cookie () =
      an authorized peer *)
   let* responder, msg2 = Zostera.step1 msg1 ~peer:authorize r in
   (* transform [msg2] to a string *)
-  let _mac1, pkt = Zostera.pkt_of_responder ~now responder _0 (Zostera.public i) msg2 in
+  let pkt = Zostera.pkt_of_responder ~now responder _0 ri msg2 in
   let* link, msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)
     match Zostera.msg2_of_string cookie_generator_i limiter_i ~now ~load:false ~peer:peer1 pkt with
-    | Ok `Cookie _ -> error_msgf "We would like to emit cookie"
+    | Ok `Cookie _ -> error_msgf "We would like to emit cookie (1)"
     | Ok (`Msg2 (link, msg2)) -> Ok (link, msg2)
     | Error _ as err -> err in
   (* on the [i], we are able to create a session *)
@@ -92,31 +93,25 @@ let run_with_cookie () =
   let limiter_i = Zostera.Limiter.create () in (* ratelimit on [i] *)
   let limiter_r = Zostera.Limiter.create () in (* ratelimit on [r] *)
   let cookie_generator_i = Zostera.cookie_generator ~me:i () in (* cookies generator for [i] *)
-  let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
-  let cookie_validator_for_i_from_r = Zostera.validator rr in
   let cookie_generator_r = Zostera.cookie_generator ~me:r () in (* cookies generator for [r] *)
+  let* rr = Zostera.remote ~psk:q i (Zostera.public r) in
   let* ri = Zostera.remote ~psk:q r (Zostera.public i) in
-  let cookie_validator_for_r_from_i = Zostera.validator ri in
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
-  let mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
-  (* transform the packet to a string, and we give the [mac1] *)
-  let* cookie =
-    (* here, we decode the packet as [r] and get [msg1] *)
-    (* [load = true] => [`Cookie _] *)
-    match Zostera.msg1_of_string cookie_generator_r limiter_r ~now ~load:true ~peer:peer0 pkt1 with
+  let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
+  let* cookie = match Zostera.msg1_of_string cookie_generator_r limiter_r ~now ~load:true ~peer:peer0 pkt1 with
     | Ok (`Cookie cookie) -> Ok cookie
-    | Ok (`Msg1 (uid, msg1)) -> error_msgf "Unexpected msg1"
+    | Ok (`Msg1 _) -> error_msgf "Unexpected msg1"
     | Error _ as err -> err in
-  let* cookie =
+  let* () =
     let uid = Zostera.uid_of_initiator init0 in
-    Zostera.check_cookie_of_pkt cookie_validator_for_i_from_r ~now ~uid ~mac1 cookie in
-  let _mac1, pkt1 = Zostera.pkt_of_initiator ~now init0 ~cookie msg1 in
+    Zostera.consume_cookie rr ~now ~uid cookie in
+  let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
   let* (_0, msg1) =
     (* here, we decode the packet as [r] and get [msg1] *)
     (* [load = true] => [`Cookie _] *)
     match Zostera.msg1_of_string cookie_generator_r limiter_r ~now ~load:true ~peer:peer0 pkt1 with
-    | Ok `Cookie _ -> error_msgf "We would like to emit cookie"
+    | Ok (`Cookie cookie) -> error_msgf "We would like to emit cookie (0)"
     | Ok (`Msg1 (uid, msg1)) -> Ok (uid, msg1)
     | Error _ as err -> err in
   (* here, we compute [msg1] and generate [msg2] *)
@@ -125,13 +120,13 @@ let run_with_cookie () =
      an authorized peer *)
   let* responder, msg2 = Zostera.step1 msg1 ~peer:authorize r in
   (* transform [msg2] to a string *)
-  let _mac1, pkt = Zostera.pkt_of_responder ~now responder _0 (Zostera.public i) msg2 in
+  let pkt = Zostera.pkt_of_responder ~now responder _0 ri msg2 in
   let* link, msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)
     (* reynir: does it even make sense for [i] to be under load? [i] cannot send a cookie I think *)
     match Zostera.msg2_of_string cookie_generator_i limiter_i ~now ~load:false ~peer:peer1 pkt with
-    | Ok `Cookie _ -> error_msgf "We would like to emit cookie"
+    | Ok `Cookie _ -> error_msgf "We would like to emit cookie (1)"
     | Ok (`Msg2 (link, msg2)) -> Ok (link, msg2)
     | Error _ as err -> err in
   (* on the [i], we are able to create a session *)

@@ -124,16 +124,42 @@ let cookie_generator ?g ~me:(_, ((_, mac1_key) as public)) () =
   let _Rm = Mirage_crypto_rng.generate ?g 32 in
   { _Rm; birth= 0; mac1_key; cookie_key }
 
-type validator =
-  { cookie_key : string
-  ; mutable cookie : (string * int) option }
+type cookie = { cookie : string; birth : int }
 
 type remote =
   { octets : string
   ; mac1_key : string
   ; cookie_key : string
   ; _SS : string
-  ; _Q : string }
+  ; _Q : string
+  ; mutable cookie : cookie option
+  ; mutable last_mac1 : mac1 option }
+and mac1 = string
+
+let empty = String.make 16 '\x00'
+
+let add_macs ~now (remote : remote) ~off pkt =
+  let mac1 = _mac ~key:remote.mac1_key (Bytes.unsafe_to_string pkt) ~off:0 ~len:off in
+  Bytes.blit_string mac1 0 pkt off 16;
+  remote.last_mac1 <- Some mac1;
+  match remote.cookie with
+  | Some { cookie; birth } when now () < birth + _COOKIE_LIFETIME ->
+    let mac2 = _mac ~key:cookie (Bytes.unsafe_to_string pkt) ~off:0 ~len:(off + 16) in
+    Bytes.blit_string mac2 0 pkt (off + 16) 16
+  | _ -> Bytes.blit_string empty 0 pkt (off + 16) 16
+
+let consume_cookie (remote : remote) ~now ~uid pkt =
+  let* mac1 = Option.to_result ~none:`Invalid_cookie remote.last_mac1 in
+  if String.length pkt <> 64
+  || String.get_int32_le pkt 0 <> 3l
+  || String.get_int32_le pkt 4 <> uid
+  then Error `Invalid_cookie
+  else
+    let nonce = String.sub pkt 8 24 in
+    let str = String.sub pkt 32 32 in
+    match xaead_open ~key:remote.cookie_key ~nonce ~adata:mac1 str with
+    | Some cookie -> remote.cookie <- Some { cookie; birth= now () }; Ok ()
+    | None -> Error `Invalid_cookie
 
 type initiator = Initiator
 type responder = Responder
@@ -155,25 +181,12 @@ type ('a, 'state) handshake =
 let uid_of_initiator (Initiator { uid; _ }) = uid
 
 type psk = string
-type cookie = { cookie : string; birth : int }
-
-let _Q = String.make 32 '\000'
 
 let psk str =
   if String.length str <> 32 then invalid_arg "Bruit.psk: invalid private shared key";
   str
 
-let check_cookie_of_pkt (validator : validator) ~now ~uid ~mac1 pkt =
-  if String.length pkt <> 64
-  || String.get_int32_le pkt 0 <> 3l
-  || String.get_int32_le pkt 4 <> uid
-  then Error `Invalid_cookie
-  else
-    let nonce = String.sub pkt 8 24 in
-    let s = String.sub pkt 32 32 in
-    match xaead_open ~key:validator.cookie_key ~nonce ~adata:mac1 s with
-    | Some cookie -> Ok { cookie; birth= now () }
-    | None -> Error `Invalid_cookie
+let _Q = String.make 32 '\000'
 
 type secret = Mirage_crypto_ec.X25519.secret
 type public = string * string
@@ -268,21 +281,15 @@ let decrypt _k ?(counter= 0L) txt _Hr =
   | Some plain -> Ok plain
   | None -> error_msgf "AEAD authentication failed"
 
-let empty = String.make 16 '\x00'
-
 (* remote *)
 
 let remote ?psk:(_Q= _Q) (_S_priv, _) ((octets, mac1_key) as public : public) =
   let* _SS = dh _S_priv octets in
   let cookie_key = cookie_key_of_public public in
-  Ok { octets; mac1_key; cookie_key; _SS; _Q }
+  Ok { octets; mac1_key; cookie_key; _SS; _Q; cookie= None; last_mac1= None }
 
 let remote_of_octets ?psk t str = remote ?psk t (public_of_octets str)
 let octets_of_remote { octets; _ } = octets
-
-(* validator *)
-
-let validator ({ cookie_key; _ } : remote) = { cookie_key; cookie= None }
 
 (* shared *)
 
@@ -290,13 +297,7 @@ type shared = string
 
 let shared (_S_priv, _) (_S_pub, _) = dh _S_priv _S_pub
 
-let mac2 ~now ?(off= 0) pkt = function
-  | Some { cookie; birth } when now () < birth + _COOKIE_LIFETIME ->
-    let mac2 = _mac ~key:cookie (Bytes.unsafe_to_string pkt) ~off:0 ~len:off in
-    Bytes.blit_string mac2 0 pkt off 16
-  | _ -> Bytes.blit_string empty 0 pkt off 16
-
-type msg1 = string * string * string and mac1 = string
+type msg1 = string * string * string
 
 let step0 ?g ~now ((_Si_priv, (_Si_pub, _)) : t)
   (({ octets= _Sr_pub; _SS; _ } as remote) : remote) =
@@ -333,17 +334,15 @@ let step0 ?g ~now ((_Si_priv, (_Si_pub, _)) : t)
   let uid = uid ?g () in
   Ok (Initiator { _Hi; _Ci; uid; remote; _Ei_priv }, (ephemeral, static, timestamp))
 
-let pkt_of_initiator ~now (Initiator { uid; remote= { mac1_key= _Kr; _ }; _ }) ?cookie (ephemeral, static, timestamp) =
+let pkt_of_initiator ~now (Initiator { uid; remote; _ }) (ephemeral, static, timestamp) =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 1;
   Bytes.set_int32_le pkt 4 uid;
   Bytes.blit_string ephemeral 0 pkt 8 32;
   Bytes.blit_string static 0 pkt 40 48;
   Bytes.blit_string timestamp 0 pkt 88 28;
-  let mac1 = _mac ~key:_Kr (Bytes.unsafe_to_string pkt) ~off:0 ~len:116 in
-  Bytes.blit_string mac1 0 pkt 116 16;
-  mac2 ~now ~off:132 pkt cookie;
-  (mac1, Bytes.unsafe_to_string pkt)
+  add_macs ~now remote ~off:116 pkt;
+  Bytes.unsafe_to_string pkt
 
 let tau cookie_generator ~now addr =
   _mac ~key:(secret_of_cookie_generator cookie_generator ~now) (Addr.to_octets addr)
@@ -440,18 +439,16 @@ let step1 ?g ~peer (_Ei_pub, static, timestamp) (_Sr_priv, (_Sr_pub, _)) =
 Ok (Responder { _Hr; _Cr; uid; _Er_priv }, (ephemeral, empty))
 
 let pkt_of_responder
-  : type a. now:(unit -> int) -> (responder, a) handshake -> uid -> public -> ?cookie:cookie -> msg2 -> mac1 * string
-  = fun ~now (Responder { uid= uid0; _ }) uid1 (_, _Ki) ?cookie (ephemeral, empty) ->
+  : type a. now:(unit -> int) -> (responder, a) handshake -> uid -> remote -> msg2 -> string
+  = fun ~now (Responder { uid= uid0; _ }) uid1 (remote : remote) (ephemeral, empty) ->
   let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 2;
   Bytes.set_int32_le pkt 4 uid0;
   Bytes.set_int32_le pkt 8 uid1;
   Bytes.blit_string ephemeral 0 pkt 12 32;
   Bytes.blit_string empty 0 pkt 44 16;
-  let mac1 = _mac ~key:_Ki (Bytes.unsafe_to_string pkt) ~off:0 ~len:60 in
-  Bytes.blit_string mac1 0 pkt 60 16;
-  mac2 ~now ~off:76 pkt cookie;
-  (mac1, Bytes.unsafe_to_string pkt)
+  add_macs ~now remote ~off:60 pkt;
+  Bytes.unsafe_to_string pkt
 
 type link = { sender : uid; receiver : uid }
 

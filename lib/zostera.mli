@@ -50,6 +50,7 @@ type remote
 val remote : ?psk:psk -> t -> public -> (remote, [> error ]) result
 val remote_of_octets : ?psk:psk -> t -> string -> (remote, [> error ]) result
 val octets_of_remote : remote -> string
+val consume_cookie : remote -> now:(unit -> int) -> uid:uid -> string -> (unit, [> error ]) result
 
 type shared
 
@@ -62,22 +63,6 @@ type mac1
 type cookie_generator
 
 val cookie_generator : ?g:Mirage_crypto_rng.g -> me:t -> unit -> cookie_generator
-
-type validator
-
-val validator : remote -> validator
-
-type cookie
-(** To prevent denial of service attacks a peer may send back a cookie while
-    under load. A [cookie] represents such a cookie. *)
-
-val check_cookie_of_pkt :
-     validator
-  -> now:(unit -> int)
-  -> uid:uid
-  -> mac1:mac1
-  -> string
-  -> (cookie, [> error ]) result
 
 module Addr = Addr
 module Limiter = Limiter
@@ -108,9 +93,8 @@ val step0 :
 val pkt_of_initiator :
      now:(unit -> int)
   -> (initiator, pending) handshake
-  -> ?cookie:cookie
   -> msg1
-  -> mac1 * string
+  -> string
 
 val msg1_of_string :
      ?g:Mirage_crypto_rng.g
@@ -136,10 +120,9 @@ val pkt_of_responder :
      now:(unit -> int)
   -> (responder, 'a) handshake
   -> uid
-  -> public
-  -> ?cookie:cookie
+  -> remote
   -> msg2
-  -> mac1 * string
+  -> string
 
 type link
 
