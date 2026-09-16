@@ -235,7 +235,11 @@ let tai64n ~now =
   let tai = Int64.rem nsecs 1_000_000_000L in
   let secs = Int64.add secs 0x400000000000000AL in
   (* NOTE(dinosaure): as [wireguard-go], we round down the nanoseconds to
-     reduce the chance of leaking timing info. *)
+     reduce the chance of leaking timing info. See § 5.1:
+
+     > If the precision of a TIA64N poses an unsuitable information leak,
+     > implementations may truncate 24 bits of the nanoseconds portion of the
+     > timestamp. *)
   let tai = Int32.logand (Int64.to_int32 tai) (Int32.lognot whitener_mask) in
   let buf = Bytes.create 12 in
   Bytes.set_int64_be buf 0 secs;
