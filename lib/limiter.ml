@@ -37,7 +37,7 @@ let allow t ~now { Addr.ipaddr; _ } =
     let tokens = Float.min _BURST tokens in
     entry.tokens <- tokens;
     entry.last <- ts;
-    if entry.tokens >= 1.
+    if entry.tokens > 1.
     then begin entry.tokens <- entry.tokens -. 1.; true end
     else false
   | None when Hashtbl.length t.tbl >= _MAX_ENTRIES -> false
