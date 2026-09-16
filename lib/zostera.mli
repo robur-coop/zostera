@@ -2,6 +2,14 @@
 
     This module implements the Wireguard protocol which is described here:
     https://www.wireguard.com/papers/wireguard.pdf
+
+    {[
+      initiator     receiver
+          |            |
+          | -- msg1 -> |
+          |            |
+          | <- msg2 -- |
+    ]}
 *)
 
 type error = [ `Msg of string | `Invalid_cookie | Mirage_crypto_ec.error ]
@@ -12,13 +20,33 @@ type error = [ `Msg of string | `Invalid_cookie | Mirage_crypto_ec.error ]
 val pp_error : error Fmt.t
 (** Pretty printer for {!type:error} values. *)
 
+(** {2 Unique ID.}
+
+    A 32-bit index that locally represents the other peer, analogous to IPsec's
+    "SPI". *)
+
 type uid = private int32
+(** Type of unique IDs. *)
 
 val uid : ?g:Mirage_crypto_rng.g -> unit -> uid
+(** [uid ?g ()] generates a new unique ID. *)
+
+(** {2 Pre-shared Symmetric Key.}
+
+    The secrecy of all data sent via WireGuard relies on the security of the
+    Curve25529 ECDH function. In order to mitigate any future advances in
+    quantum computing, WireGuard also support a mode in which any pair of peers
+    might additionally pre-share a single 256-bit (32 bytes) symmetric
+    encryption key between themselves, in order to add an additional layer of
+    symmetric encryption. *)
 
 type psk
+(** Type of pre-shared symmetric keys. *)
 
 val psk : string -> psk
+(** [psk octets] is a pre-shared symmetric key.
+
+    @raise Invalid_argument if [octets] is not a 32-bytes string. *)
 
 (** {2 Identity.} *)
 
@@ -74,20 +102,63 @@ val consume_cookie :
     the given [remote] (with its [uid] according to the current handshake, see
     {!val:uid_of_initiator}). *)
 
-(** {2 Bakery of cookies.} *)
+(** {2 Bakery of cookies.}
+
+    A WireGuard node may be under load when processing several handshakes at
+    the same time. In this case, the node may respond to certain peers with a
+    cookie that delays the handshake. Peers then use this cookie in order to
+    resent the message and have it be accepted the following time by the node.
+
+    The node maintains a secret random value that changes every two minutes. A
+    cookie is simply the result of computing a {i mac} of the peer's source IP
+    address using this changing secret as the {i mac} key. The peer, when
+    resending its message, sends a {i mac} of its message using this cookie as
+    the {i mac} key. Then the node receives the message, if it is under load,
+    it may choose whether or not to accept and process the message based on
+    whether or not there is a correct {i mac} that uses the cookie as a key.
+
+    A {i bakery} is a global variable at the node level used to generate these
+    cookies based on a secret {i Rm}, which is updated lazily every 2 minutes.
+*)
 
 module Bakery : sig
   type identity = t
-  type t
+  (** The type of identities. *)
+
+  type t (** The type of bakeries. *)
 
   val create : ?g:Mirage_crypto_rng.g -> me:identity -> unit -> t
+  (** [create ?g ~me ()] creates a new bakery which is able to generate cookies
+      if needed during handshakes. *)
 end
 
 module Addr = Addr
 module Limiter = Limiter
 
+(** {2 Timestamps.}
+
+    Having authentication in the first packet like this potentially opens up
+    the responder to a replay attack. An attacker could replay initial
+    handshake messages to trick the responder into regenerating its ephemeral
+    key, thereby invalidating the session of the legitimate initiator (though
+    not affecting the secrecy or authenticity of any messages). To prevent
+    this, a timestamp is included, encrypted and authenticated, in the first
+    message ({!type:msg1}). The responder keeps track of the greatest timestamp
+    received per peer (that is the reason for {!val:newer}) and discards
+    packets containing timestamps less than or equal to it. This timestamp
+    ensures that an attacker may not disrupt a current session between
+    initiator and responder via replay attack.
+
+    In this case, the {!val:step1} function processes the first message and
+    asks the user for authorisation from a potential initiator. The user must
+    respond, based on the public key provided by {!type:msg1}, either by
+    rejecting ([`Reject`]) or accepting with:
+    1) the latest date on which this initiator attempted the handshake
+    2) a function enabling this date to be updated on the user's side
+*)
+
 type timestamp
-(** Type of timestamps. *)
+(** Type of timestamps (TAI64N). *)
 
 val newer : timestamp -> timestamp -> bool
 (** [newer t0 t1] returns [true] if [t0 < t1]. Otherwise, it returns [false]. *)
@@ -115,12 +186,12 @@ val step0 :
 (** [step0 ?g ~now identity remote] generates a new handshake state and a
     {!type:msg1} that's the user can send to the {i responder}. *)
 
-val pkt_of_initiator :
+val msg1_to_string :
      now:(unit -> int)
   -> (initiator, pending) handshake
   -> msg1
   -> string
-(** [pkt_of_initiator ~now state msg1] returns a WireGuard packet which should
+(** [msg1_to_string ~now state msg1] returns a WireGuard packet which should
     be send to the {i responder}. *)
 
 val msg1_of_string :
@@ -155,7 +226,7 @@ val step1 :
     operated with this {i initiator} and a function which is able to update
     to last timestamp when this {i initiator} tried a handshake. *)
 
-val pkt_of_responder :
+val msg2_to_string :
      now:(unit -> int)
   -> (responder, 'a) handshake
   -> msg2

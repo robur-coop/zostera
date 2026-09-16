@@ -37,7 +37,7 @@ let run_without_cookie () =
   let cookie_generator_r = Zostera.Bakery.create ~me:r () in (* cookies generator for [r] *)
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
-  let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
+  let pkt1 = Zostera.msg1_to_string ~now init0 msg1 in
   (* transform the packet to a string, and we give the [mac1] *)
   let* msg1 =
     (* here, we decode the packet as [r] and get [msg1] *)
@@ -52,7 +52,7 @@ let run_without_cookie () =
      an authorized peer *)
   let* responder, msg2 = Zostera.step1 msg1 ~peer:authorize r in
   (* transform [msg2] to a string *)
-  let pkt = Zostera.pkt_of_responder ~now responder msg2 in
+  let pkt = Zostera.msg2_to_string ~now responder msg2 in
   let* msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)
@@ -91,7 +91,7 @@ let run_with_cookie () =
   let cookie_generator_r = Zostera.Bakery.create ~me:r () in (* cookies generator for [r] *)
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
-  let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
+  let pkt1 = Zostera.msg1_to_string ~now init0 msg1 in
   let* cookie = match Zostera.msg1_of_string cookie_generator_r limiter_r ~now ~load:true ~peer:peer0 pkt1 with
     | Ok (`Cookie cookie) -> Ok cookie
     | Ok (`Msg1 _) -> error_msgf "Unexpected msg1"
@@ -99,7 +99,7 @@ let run_with_cookie () =
   let* () =
     let uid = Zostera.uid_of_initiator init0 in
     Zostera.consume_cookie rr ~now ~uid cookie in
-  let pkt1 = Zostera.pkt_of_initiator ~now init0 msg1 in
+  let pkt1 = Zostera.msg1_to_string ~now init0 msg1 in
   let* msg1 =
     (* here, we decode the packet as [r] and get [msg1] *)
     (* [load = true] => [`Cookie _] *)
@@ -113,7 +113,7 @@ let run_with_cookie () =
      an authorized peer *)
   let* responder, msg2 = Zostera.step1 msg1 ~peer:authorize r in
   (* transform [msg2] to a string *)
-  let pkt = Zostera.pkt_of_responder ~now responder msg2 in
+  let pkt = Zostera.msg2_to_string ~now responder msg2 in
   let* msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)

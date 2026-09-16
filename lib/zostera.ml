@@ -341,7 +341,7 @@ let step0 ?g ~now ((_, (_Si_pub, _)) : t)
   let msg1 = { sender= uid; ephemeral; static; timestamp } in
   Ok (Initiator { _Hi; _Ci; uid; remote; consumed= Atomic.make false; _Ei_priv }, msg1)
 
-let pkt_of_initiator ~now (Initiator { uid; remote; _ }) { ephemeral; static; timestamp; _ } =
+let msg1_to_string ~now (Initiator { uid; remote; _ }) { ephemeral; static; timestamp; _ } =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 1;
   Bytes.set_int32_le pkt 4 uid;
@@ -351,43 +351,43 @@ let pkt_of_initiator ~now (Initiator { uid; remote; _ }) { ephemeral; static; ti
   add_macs ~now remote ~off:116 pkt;
   Bytes.unsafe_to_string pkt
 
-let tau cookie_generator ~now addr =
-  _mac ~key:(Bakery.secret cookie_generator ~now) (Addr.to_octets addr)
+let tau bakery ~now addr =
+  _mac ~key:(Bakery.secret bakery ~now) (Addr.to_octets addr)
 
 let verify_mac ~key ~off pkt =
   let expect = _mac ~key pkt ~off:0 ~len:off in
   let have = String.sub pkt off 16 in
   Eqaf.equal expect have
 
-let cookie ?g (cookie_generator : Bakery.t) ~tau str =
+let cookie ?g (bakery : Bakery.t) ~tau str =
   let pkt = Bytes.make 64 '\000' in
   Bytes.set_uint8 pkt 0 3;
   Bytes.blit_string str 4 pkt 4 4;
   let nonce = Mirage_crypto_rng.generate ?g 24 in
   Bytes.blit_string nonce 0 pkt 8 24;
   let adata = String.sub str (String.length str - 32) 16 in
-  let s = xaead ~key:cookie_generator.cookie_key ~nonce ~adata tau in
+  let s = xaead ~key:bakery.cookie_key ~nonce ~adata tau in
   Bytes.blit_string s 0 pkt 32 32;
   Bytes.unsafe_to_string pkt
 
-let defend ?g (cookie_generator : Bakery.t) limiter ~now ~load ~peer ~off pkt =
+let defend ?g (bakery : Bakery.t) limiter ~now ~load ~peer ~off pkt =
   let* () = guard ~err:(msgf "Invalid MAC1") @@ fun () ->
-    verify_mac ~key:cookie_generator.mac1_key ~off pkt in
+    verify_mac ~key:bakery.mac1_key ~off pkt in
   if not load then Ok `Ok
   else
-    let tau = tau cookie_generator ~now peer in
+    let tau = tau bakery ~now peer in
     if not (verify_mac ~key:tau ~off:(off + 16) pkt)
-    then Ok (`Cookie (cookie ?g cookie_generator ~tau pkt))
+    then Ok (`Cookie (cookie ?g bakery ~tau pkt))
     else if not (Limiter.allow limiter ~now peer)
     then error_msgf "Too many retries"
     else Ok `Ok
 
-let msg1_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
+let msg1_of_string ?g bakery limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg1 packet") @@ fun () ->
     String.length pkt = 148 in
   let* () = guard ~err:(msgf "Invalid msg1 packet") @@ fun () ->
     String.get_int32_le pkt 0 = 1l in
-  let* continue = defend ?g cookie_generator limiter ~now ~load ~peer ~off:116 pkt in
+  let* continue = defend ?g bakery limiter ~now ~load ~peer ~off:116 pkt in
   match continue with
   | `Cookie _ as cookie -> Ok cookie
   | `Ok ->
@@ -456,7 +456,7 @@ let step1 ?g ~peer { sender= remote_uid; ephemeral= _Ei_pub; static; timestamp; 
   let msg2 = { sender= uid; receiver= remote_uid; ephemeral; empty } in
   Ok (Responder { _Hr; _Cr; uid; remote_uid; remote; consumed= Atomic.make false; _Er_priv }, msg2)
 
-let pkt_of_responder
+let msg2_to_string
   : type a. now:(unit -> int) -> (responder, a) handshake -> msg2 -> string
   = fun ~now (Responder { remote; _ }) { sender; receiver; ephemeral; empty; _ } ->
   (* TODO(dinosaure): check uids from our [state] and [msg2]. *)
@@ -469,12 +469,12 @@ let pkt_of_responder
   add_macs ~now remote ~off:60 pkt;
   Bytes.unsafe_to_string pkt
 
-let msg2_of_string ?g cookie_generator limiter ~now ~load ~peer pkt =
+let msg2_of_string ?g bakery limiter ~now ~load ~peer pkt =
   let* () = guard ~err:(msgf "Truncated msg2 packet") @@ fun () ->
     String.length pkt = 92 in
   let* () = guard ~err:(msgf "Invalid msg2 packet") @@ fun () ->
     String.get_int32_le pkt 0 = 2l in
-  let* continue = defend ?g cookie_generator limiter ~now ~load ~peer ~off:60 pkt in
+  let* continue = defend ?g bakery limiter ~now ~load ~peer ~off:60 pkt in
   match continue with
   | `Cookie _ as cookie -> Ok cookie
   | `Ok ->
