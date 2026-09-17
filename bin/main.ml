@@ -132,15 +132,17 @@ let run_with_cookie () =
      it's about cookies. Both (peers) can send such packet. so [i] can also generate and
      send a cookie. *)
   let* session0 = Zostera.step2 ~now msg2 i init0 in
-  let { Zostera.send= _Ai; recv= _Bi } = Zostera.keys session0 in
-  (* on the [r], we are able to create a session with [_0]/[peer0] *)
   let* session1 = Zostera.session_of_responder ~now responder in
-  let { Zostera.recv= _Ar; send= _Br } =
-    Zostera.keys session1 in
-  (* [i] and [r] shares keys *)
-  if _Ai = _Ar && _Bi = _Br
-  then Ok () else error_msgf "Handshake failure"
-
+  let* pkt = Zostera.keepalive ~now session0 in
+  let* session1 = match Zostera.confirm ~now session1 pkt with
+    | Ok (session1, _) -> Ok session1
+    | Error _ as err -> err in
+  let* pkt = Zostera.send ~now session1 "Hello World!" in
+  let* () = match Zostera.recv ~now session0 pkt with
+    | Ok (`Data "Hello World!\000\000\000\000") -> Ok ()
+    | Ok _ -> error_msgf "Unexpected value"
+    | Error _ as err -> err in
+  Ok ()
 
 let () =
   Mirage_crypto_rng_unix.use_default ();
