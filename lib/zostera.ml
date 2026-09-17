@@ -585,7 +585,7 @@ let nonce counter =
   Bytes.set_int64_le buf 4 counter;
   Bytes.unsafe_to_string buf
 
-let _encrypt_data ~key ~counter msg =
+let encrypt_data ~key ~counter msg =
   let key = Mirage_crypto.Chacha20.of_secret key in
   Mirage_crypto.Chacha20.authenticate_encrypt ~key ~nonce:(nonce counter) msg
 
@@ -607,7 +607,7 @@ let recv ~now { local; keys; birth; window; _ } pkt =
   let* () = guard ~err:(msgf "Expired session") @@ fun () ->
     now () - birth < _REJECT_AFTER_TIME in
   let counter = String.get_int64_le pkt 8 in
-  let* () = guard ~err:(msgf "Expired session") @@ fun () ->
+  let* () = guard ~err:(msgf "Exhausted session") @@ fun () ->
     Int64.unsigned_compare counter _REJECT_AFTER_MESSAGES < 0 in
   let txt = String.sub pkt 16 (String.length pkt - 16) in
   let* msg = match decrypt_data ~key:keys.recv ~counter txt with
@@ -622,6 +622,45 @@ let confirm ~now session pkt =
   let* () = guard ~err:(msgf "Session already confirmed") @@ fun () ->
     Atomic.compare_and_set session.confirmed false true in
   Ok ({ session with confirmed= session.confirmed }, data)
+
+let _PADDING = 16
+
+let send ~now ({ remote; keys; birth; _ } as session) msg =
+  let* () = guard ~err:(msgf "Expired session") @@ fun () ->
+    now () - birth < _REJECT_AFTER_TIME in
+  let counter = !(session.counter) in
+  let* () = guard ~err:(msgf "Exhausted session") @@ fun () ->
+    Int64.unsigned_compare counter _REJECT_AFTER_MESSAGES < 0 in
+  session.counter := Int64.add counter 1L;
+  let len = String.length msg in
+  let pad = (_PADDING - (len mod _PADDING)) land (_PADDING - 1) in
+  let buf = Bytes.make (len + pad) '\000' in
+  Bytes.blit_string msg 0 buf 0 len;
+  let txt = encrypt_data ~key:keys.send ~counter (Bytes.unsafe_to_string buf) in
+  let pkt = Bytes.make (16 + String.length txt) '\000' in
+  (* TODO(dinosaure): use authenticate_encrypt_into *)
+  Bytes.set_uint8 pkt 0 4;
+  Bytes.set_int32_le pkt 4 remote;
+  Bytes.set_int64_le pkt 8 counter;
+  Bytes.blit_string txt 0 pkt 16 (String.length txt);
+  Ok (Bytes.unsafe_to_string pkt)
+
+let keepalive ~now session = send ~now session String.empty
+
+let expired ~now { birth; counter; _ } =
+  now () - birth >= _REJECT_AFTER_TIME
+  || Int64.unsigned_compare !counter _REJECT_AFTER_MESSAGES >= 0
+
+let _REKEY_AFTER_MESSAGES = 0x1000000000000000L
+let _REKEY_AFTER_TIME = 120_000_000_000
+let _REKEY_TIMEOUT = 5_000_000_000
+let _KEEPALIVE_TIMEOUT = 10_000_000_000
+
+let rekey ~now { role; birth; counter; _ } =
+  Int64.unsigned_compare !counter _REKEY_AFTER_MESSAGES >= 0
+  || match role with
+     | Initiator -> now () - birth >= _REKEY_AFTER_TIME
+     | Responder -> now () - birth >= _REJECT_AFTER_TIME - _KEEPALIVE_TIMEOUT - _REKEY_TIMEOUT
 
 let keys { keys; _ } = keys
 

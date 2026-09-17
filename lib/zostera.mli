@@ -279,6 +279,20 @@ val recv :
   -> string
   -> (out, [> error ]) result
 
+val send :
+     now:(unit -> int)
+  -> ('role, confirmed) session
+  -> string
+  -> (string, [> error ]) result
+
+val keepalive :
+     now:(unit -> int)
+  -> ('role, confirmed) session
+  -> (string, [> error ]) result
+
+val expired : now:(unit -> int) -> ('role, 'state) session -> bool
+val rekey : now:(unit -> int) -> ('role, 'state) session -> bool
+
 type keys = { send : string; recv : string }
 
 val keys : ('role, 'state) session -> keys
