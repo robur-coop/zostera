@@ -494,12 +494,38 @@ type role =
 
 type keys = { send : string; recv : string }
 
+(* see [replay.go] *)
 module Window = struct
   type t = { mutable last : int64; bits : bytes }
 
-  let _BITS = 8192
-  let _WORDS = _BITS / 64
-  let make () = { last= 0L; bits= Bytes.make (_WORDS * 8) '\000' }
+  let _BLOCKS = 128
+  let _SIZE = Int64.of_int ((_BLOCKS - 1) * 64)
+
+  let make () = { last= 0L; bits= Bytes.make (_BLOCKS * 8) '\000' }
+  let get t idx = Bytes.get_int64_ne t.bits (idx * 8)
+  let set t idx value = Bytes.set_int64_ne t.bits (idx * 8) value
+  let index counter = Int64.to_int (Int64.logand counter (Int64.of_int (_BLOCKS - 1)))
+
+  let validate t counter =
+    let block = Int64.shift_right_logical counter 6 in
+    let continue = if Int64.unsigned_compare counter t.last > 0 then begin
+        let current = Int64.shift_right_logical t.last 6 (* blockBitLog *) in
+        let diff = Int64.sub block current in
+        let diff = if Int64.unsigned_compare diff (Int64.of_int _BLOCKS) > 0
+          then _BLOCKS (* cap diff to clear the whole ring *)
+          else Int64.to_int diff in
+        for i = 1 to diff do
+          set t (index (Int64.add current (Int64.of_int i))) 0L
+        done;
+        t.last <- counter; true
+      end else Int64.unsigned_compare (Int64.sub t.last counter) _SIZE <= 0 in
+    continue &&
+    let idx = index block in
+    let old = get t idx in
+    let bit = Int64.shift_left 1L (Int64.to_int (Int64.logand counter 63L)) in
+    let neu (* new *) = Int64.logor old bit in
+    set t idx neu;
+    old <> neu
 end
 
 type window = Window.t
@@ -510,16 +536,20 @@ type ('role, 'state) session =
   ; keys : keys
   ; birth : int
   ; role : role
-  ; mutable counter : int64
+  ; counter : int64 ref
   ; window : window
-  ; mutable confirmed : bool }
+  ; confirmed : bool Atomic.t }
+
+let uid_of_local { local; _ } = local
+let uid_of_peer { remote; _ } = remote
 
 let session ~now ~role ~local ~remote _C =
   let keys = match role with
     | Initiator -> let send, recv = kdf2 ~ck:_C ~ikm:"" in { send; recv }
     | Responder -> let recv, send = kdf2 ~ck:_C ~ikm:"" in { send; recv } in
   { local; remote; keys; birth= now ()
-  ; role; counter= 0L; window= Window.make (); confirmed= (role = Initiator) }
+  ; role; counter= ref 0L; window= Window.make ()
+  ; confirmed= Atomic.make (role = Initiator) }
 
 let step2 ~now { sender; receiver; ephemeral= _Er_pub; empty } (_Si_priv, _Si_pub)
   (Initiator { _Ci; _Hi; uid; remote= { _Q; _ }; consumed; _Ei_priv } : (initiator, _) handshake) =
@@ -547,7 +577,51 @@ let session_of_responder ~now
     Atomic.compare_and_set consumed false true in
   Ok (session ~now ~role:Responder ~local:uid ~remote:remote_uid _Cr)
 
-let confirm _ = assert false
+let _REJECT_AFTER_MESSAGES = 0xffffffffffffdfffL
+let _REJECT_AFTER_TIME = 180_000_000_000
+
+let nonce counter =
+  let buf = Bytes.make 12 '\000' in
+  Bytes.set_int64_le buf 4 counter;
+  Bytes.unsafe_to_string buf
+
+let _encrypt_data ~key ~counter msg =
+  let key = Mirage_crypto.Chacha20.of_secret key in
+  Mirage_crypto.Chacha20.authenticate_encrypt ~key ~nonce:(nonce counter) msg
+
+let decrypt_data ~key ~counter txt =
+  let key = Mirage_crypto.Chacha20.of_secret key in
+  Mirage_crypto.Chacha20.authenticate_decrypt ~key ~nonce:(nonce counter) txt
+
+type out =
+  [ `Keepalive
+  | `Data of string ]
+
+let recv ~now { local; keys; birth; window; _ } pkt =
+  let* () = guard ~err:(msgf "Truncated data packet") @@ fun () ->
+    String.length pkt >= 32 in
+  let* () = guard ~err:(msgf "Invalid data packet") @@ fun () ->
+    String.get_int32_le pkt 0 = 4l in
+  let* () = guard ~err:(msgf "Unexpected receiver uid") @@ fun () ->
+    String.get_int32_le pkt 4 = local in
+  let* () = guard ~err:(msgf "Expired session") @@ fun () ->
+    now () - birth < _REJECT_AFTER_TIME in
+  let counter = String.get_int64_le pkt 8 in
+  let* () = guard ~err:(msgf "Expired session") @@ fun () ->
+    Int64.unsigned_compare counter _REJECT_AFTER_MESSAGES < 0 in
+  let txt = String.sub pkt 16 (String.length pkt - 16) in
+  let* msg = match decrypt_data ~key:keys.recv ~counter txt with
+    | Some msg -> Ok msg
+    | None -> error_msgf "AEAD authentication failed" in
+  let* () = guard ~err:(msgf "Replayed packet") @@ fun () ->
+    Window.validate window counter in
+  if String.length msg = 0 then Ok `Keepalive else Ok (`Data msg)
+
+let confirm ~now session pkt =
+  let* data = recv ~now session pkt in
+  let* () = guard ~err:(msgf "Session already confirmed") @@ fun () ->
+    Atomic.compare_and_set session.confirmed false true in
+  Ok ({ session with confirmed= session.confirmed }, data)
 
 let keys { keys; _ } = keys
 

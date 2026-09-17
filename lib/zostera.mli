@@ -248,6 +248,9 @@ val msg2_of_string :
 
 type ('a, 'state) session
 
+val uid_of_local : ('role, 'state) session -> uid
+val uid_of_peer : ('role, 'state) session -> uid
+
 val step2 :
      now:(unit -> int)
   -> msg2
@@ -260,7 +263,21 @@ val session_of_responder :
   -> (responder, confirmed) handshake
   -> ((responder, pending) session, [> error ]) result
 
-val confirm : (responder, pending) session -> string -> ((responder, confirmed) session, [> error ]) result
+type out =
+  [ `Keepalive
+  | `Data of string ]
+
+val confirm :
+     now:(unit -> int)
+  -> (responder, pending) session
+  -> string
+  -> ((responder, confirmed) session * out, [> error ]) result
+
+val recv :
+     now:(unit -> int)
+  -> ('role, confirmed) session
+  -> string
+  -> (out, [> error ]) result
 
 type keys = { send : string; recv : string }
 
