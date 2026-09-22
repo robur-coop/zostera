@@ -63,10 +63,105 @@ let test01 =
     Test.check !res
   done
 
+let reject_after_messages =
+  let open Int64 in
+  sub (neg (shift_left 1L 13)) 1L (* -8193 *)
+
+let test02 =
+  let descr = {text|window|text} in
+  Test.test ~title:"test02" ~descr @@ fun () ->
+  let module Window = Zostera.Window in
+  let res = ref true in
+  let w = Window.make () in
+  let lim = Int64.add Window._SIZE 1L in
+  let t n expected =
+    let value = Window.validate w ~limit:reject_after_messages n = expected in
+    res := !res && value in
+  t 0L true;
+  t 1L true;
+  t 1L false;
+  t 9L true;
+  t 8L true;
+  t 7L true;
+  t 7L false;
+  t lim true;
+  t Int64.(sub lim 1L) true;
+  t Int64.(sub lim 1L) false;
+  t Int64.(sub lim 2L) true;
+  t 2L true;
+  t 2L false;
+  t Int64.(add lim 16L) true;
+  t 3L false;
+  t Int64.(add lim 16L) false;
+  t Int64.(mul lim 4L) true;
+  t Int64.(sub (mul lim 4L) (sub lim 1L)) true;
+  t 10L false;
+  t Int64.(sub (mul lim 4L) lim) false;
+  t Int64.(sub (mul lim 4L) (add lim 1L)) false;
+  t Int64.(sub (mul lim 4L) (sub lim 2L)) true;
+  t Int64.(add (mul lim 4L) (sub 1L lim)) false;
+  t 0L false;
+  t reject_after_messages false;
+  t Int64.(sub reject_after_messages 1L) true;
+  t reject_after_messages false;
+  t Int64.(sub reject_after_messages 1L) false;
+  t Int64.(sub reject_after_messages 2L) true;
+  t Int64.(add reject_after_messages 1L) false;
+  t Int64.(add reject_after_messages 2L) false;
+  t Int64.(sub reject_after_messages 2L) false;
+  t Int64.(sub reject_after_messages 3L) true;
+  t 0L false;
+  Test.check !res;
+  Window.reset w;
+  res := true;
+  for i = 1 to Int64.to_int Window._SIZE do
+    t (Int64.of_int i) true
+  done;
+  t 0L true;
+  t 0L false;
+  Test.check !res;
+  Window.reset w;
+  res := true;
+  for i = 2 to Int64.to_int Window._SIZE + 1 do
+    t (Int64.of_int i) true
+  done;
+  t 1L true;
+  t 0L false;
+  Test.check !res;
+  Window.reset w;
+  res := true;
+  for i = Int64.to_int Window._SIZE + 1 downto 1 do
+    t (Int64.of_int i) true
+  done;
+  Test.check !res;
+  Window.reset w;
+  res := true;
+  for i = Int64.to_int Window._SIZE + 2 downto 2 do
+    t (Int64.of_int i) true
+  done;
+  t 0L false;
+  Test.check !res;
+  Window.reset w;
+  res := true;
+  for i = Int64.to_int Window._SIZE downto 1 do
+    t (Int64.of_int i) true
+  done;
+  t Int64.(add Window._SIZE 1L) true;
+  t 0L false;
+  Test.check !res;
+  Window.reset w;
+  res := true;
+  for i = Int64.to_int Window._SIZE downto 1 do
+    t (Int64.of_int i) true
+  done;
+  t 0L true;
+  t Int64.(add Window._SIZE 1L) true;
+  Test.check !res
+
 let ( / ) = Filename.concat
 
 let () =
-  let tests = [ test00; test01 ] in
+  let tests = [ test00; test01; test02 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);

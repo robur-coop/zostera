@@ -134,6 +134,7 @@ end
 
 module Addr = Addr
 module Limiter = Limiter
+module Window = Window
 
 (** {2 Timestamps.}
 
