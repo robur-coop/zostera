@@ -11,7 +11,27 @@ type action =
   | `Drop of Zostera.public * string
   | `Error of error ]
 
-val packet : t -> timestamp:int -> now:int -> load:bool -> from:Zostera.Addr.t -> string -> (action list, [> error ]) result
-val write : t -> timestamp:int -> now:int -> Zostera.public -> string -> (action list, [> error ]) result
-val tick : t -> timestamp:int -> now:int -> action list
+val packet :
+     t
+  -> timestamp:int
+  -> now:int
+  -> load:bool
+  -> from:Zostera.Addr.t
+  -> string
+  -> (action list, [> error ]) result
+
+val write :
+     t
+  -> timestamp:int
+  -> now:int
+  -> Zostera.public
+  -> string
+  -> (action list, [> error ]) result
+
+val tick :
+     t
+  -> timestamp:int
+  -> now:int
+  -> action list
+
 val deadline : t -> int option
