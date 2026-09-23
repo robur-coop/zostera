@@ -3,13 +3,23 @@
     This module implements the Wireguard protocol which is described here:
     https://www.wireguard.com/papers/wireguard.pdf
 
-    {[
-      initiator     receiver
-          |            |
-          | -- msg1 -> |
-          |            |
-          | <- msg2 -- |
-    ]}
+    {2:clocks Clocks.}
+
+    Our implementation is free-clocks, so the user must give right values to
+    functions. [Zostera] expects 2 clocks (as WireGuard):
+    + a {i monotonic} clock, in nanoseconds, with an arbitrary origin. Only
+      differences between two values matter. It measures durations: the age
+      of a session, the lifetime of a received cookie, and the rotation of
+      the {!module:Bakery} secret. It {b must} never go backwards nor jump,
+      and the same clock must be used for every call on the same values.
+    + a {i wall} clock (only for {!val:step0}), in nanoseconds since the
+      Unix epoch. It is encoded as a TAI64N label in {!type:msg1}, and the
+      responder rejects any {!type:msg1} whose label is not strictly greater
+      than the last one it accepted from the same initiator (see
+      {!val:newer}). What matters is not accuracy but monotonicity {i accross
+      restarts}: for a given identity, the value must keep increasing even
+      after a reboot, otherwise every handshake is rejected by peers which
+      did not restart.
 *)
 
 type error = [ `Msg of string | `Invalid_cookie | Mirage_crypto_ec.error ]
@@ -158,11 +168,63 @@ type timestamp
 val newer : timestamp -> timestamp -> bool
 (** [newer t0 t1] returns [true] if [t0 < t1]. Otherwise, it returns [false]. *)
 
+(** {2 Roles and states.}
+
+    Handshakes ({!type:handshake}) and sessions ({!type:session}) carry two
+    phantom type parameters. They have no runtime representation: they only let
+    the type checker enforce the protocol's rules, so that a misuse (e.g.
+    sending with keys the peer does not have yet) is a type error instead of a
+    silent failure.
+
+    - ['role] is {!type:initiator} or {!type:responder} (as described into the
+      WireGuard whitepaper): it describes the side of the handshake we are on.
+    - ['state] is {!type:pending} or {!type:confirmed}; its meaning depends on
+      whether it applies to a {!type:handshake} or to a {!type:session}, see
+      below:
+
+    The lifecyle is:
+    {v
+      initiator: step0 -> (initiator, pending) handshake
+                 step2 (msg2 received) -> (initiator, confirmed) session
+      responder: step1 -> (responder, confirmed) handshake
+                 session_of_responder -> (responder, pending) session
+                 confirm -> (responder, confirmed) session
+    v}
+
+    We can {!val:recv} and {!val:send} data only when we have a
+    {!type:confirmed} session. Such case appears when we confirmed an handshake
+    as an {!type:initiator} or when we received a data packet and are able to
+    {!val:confirm} it as a {!type:responder}.
+
+    It exists an {i asymmetry} between {!type:initiator} and {!type:responder}
+    which is also described by the WireGuard whitepaper: the initiator knows
+    that the responder holds the new keys as soon as {!type:msg2} arrives,
+    whereas the responder only knows that the initiator received {!type:msg2}
+    when the first transport packet (data or keepalive) encrypted with these
+    keys arrives. Until then the responder must keep sending with its previous
+    session (see {!module:Bruit} for keys rotation).
+*)
+
 type initiator = private [ `initiator ]
+(** The type of initiators. *)
+
 type responder = private [ `responder ]
+(** The type of responders. *)
 
 type pending
+(** The type of pending states:
+    - for a {!type:handshake}: we are still waiting for a message from the peer
+      (and initiator's handshake before [msg2].
+    - for a {!type:session}: the keys have not been confirmed bu the peer yet.
+      Such session can only {i receive}, through {!val:confirm}; it cannot send.
+*)
+
 type confirmed
+(** The type of confirmed states:
+    - for a {!type:handshake}: the handshake is complete on our side, and the
+      keys can be derived (a responder's handshake after {!val:step1}).
+    - for a {!type:session}: the peer is known to hold the keys. The session can
+      {!val:send}, {!val:recv} and {!val:keepalive}. *)
 
 type ('role, 'state) handshake
 
@@ -183,8 +245,9 @@ val step0 :
   -> t
   -> remote
   -> ((initiator, pending) handshake * msg1, [> error ]) result
-(** [step0 ?g ~now identity remote] generates a new handshake state and a
-    {!type:msg1} that's the user can send to the {i responder}. *)
+(** [step0 ?g ~timestamp identity remote] generates a new handshake state and a
+    {!type:msg1} that's the user can send to the {i responder}. Please refer to
+    {!section:clocks} to get more details about [timestamp] argument. *)
 
 val msg1_to_string :
      now:int
@@ -248,6 +311,7 @@ val msg2_of_string :
     given packet [pkt] from the given [peer] and extract a {!type:msg2} value. *)
 
 type ('a, 'state) session
+(** An established secure session (transport keys, counters and replay window). *)
 
 val role : ('role, 'state) session -> 'role role
 val uid_of_local : ('role, 'state) session -> Uid.t
