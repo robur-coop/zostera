@@ -183,7 +183,6 @@ module Bakery = struct
   
   let secret t ~now =
     (* NOTE(dinosaure): it's lazy roundtrip of [_Rm] *)
-    let now = now () in
     if now - t.birth > _COOKIE_ROTATION then begin
       t._Rm <- Mirage_crypto_rng.generate 32;
       t.birth <- now

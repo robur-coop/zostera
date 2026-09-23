@@ -42,7 +42,7 @@ let run_without_cookie () =
   let* msg1 =
     (* here, we decode the packet as [r] and get [msg1] *)
     (* [load = true] => [`Cookie _] *)
-    match Zostera.msg1_of_string cookie_generator_r limiter_r ~now ~load:false ~peer:peer0 pkt1 with
+    match Zostera.msg1_of_string cookie_generator_r limiter_r ~now:(now ()) ~load:false ~peer:peer0 pkt1 with
     | Ok `Cookie _ -> error_msgf "We would like to emit cookie (0)"
     | Ok (`Msg1 msg1) -> Ok msg1
     | Error _ as err -> err in
@@ -56,7 +56,7 @@ let run_without_cookie () =
   let* msg2 =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)
-    match Zostera.msg2_of_string cookie_generator_i limiter_i ~now ~load:false ~peer:peer1 pkt with
+    match Zostera.msg2_of_string cookie_generator_i limiter_i ~now:(now ()) ~load:false ~peer:peer1 pkt with
     | Ok `Cookie _ -> error_msgf "We would like to emit cookie (1)"
     | Ok (`Msg2 msg2) -> Ok msg2
     | Error _ as err -> err in
@@ -92,7 +92,7 @@ let run_with_cookie () =
   let* init0, msg1 = Zostera.step0 ~now i rr in
   (* generate the first packet [msg1] *)
   let pkt1 = Zostera.msg1_to_string ~now init0 msg1 in
-  let* cookie = match Zostera.msg1_of_string cookie_generator_r limiter_r ~now ~load:true ~peer:peer0 pkt1 with
+  let* cookie = match Zostera.msg1_of_string cookie_generator_r limiter_r ~now:(now ()) ~load:true ~peer:peer0 pkt1 with
     | Ok (`Cookie cookie) -> Ok cookie
     | Ok (`Msg1 _) -> error_msgf "Unexpected msg1"
     | Error _ as err -> err in
@@ -103,7 +103,7 @@ let run_with_cookie () =
   let* msg1 =
     (* here, we decode the packet as [r] and get [msg1] *)
     (* [load = true] => [`Cookie _] *)
-    match Zostera.msg1_of_string cookie_generator_r limiter_r ~now ~load:true ~peer:peer0 pkt1 with
+    match Zostera.msg1_of_string cookie_generator_r limiter_r ~now:(now ()) ~load:true ~peer:peer0 pkt1 with
     | Ok (`Cookie cookie) -> error_msgf "We would like to emit cookie (0)"
     | Ok (`Msg1 msg1) -> Ok msg1
     | Error _ as err -> err in
@@ -118,7 +118,7 @@ let run_with_cookie () =
     (* here, we decode the packet as [i] and get [msg2] *)
     (* [load = true] => [`Cookie _] *)
     (* reynir: does it even make sense for [i] to be under load? [i] cannot send a cookie I think *)
-    match Zostera.msg2_of_string cookie_generator_i limiter_i ~now ~load:false ~peer:peer1 pkt with
+    match Zostera.msg2_of_string cookie_generator_i limiter_i ~now:(now ()) ~load:false ~peer:peer1 pkt with
     | Ok `Cookie _ -> error_msgf "We would like to emit cookie (1)"
     | Ok (`Msg2 msg2) -> Ok msg2
     | Error _ as err -> err in

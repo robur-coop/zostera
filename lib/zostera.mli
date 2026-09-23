@@ -195,7 +195,7 @@ val msg1_of_string :
      ?g:Mirage_crypto_rng.g
   -> Bakery.t
   -> Limiter.t
-  -> now:(unit -> int)
+  -> now:int
   -> load:bool
   -> peer:Addr.t
   -> string
@@ -236,7 +236,7 @@ val msg2_of_string :
      ?g:Mirage_crypto_rng.g
   -> Bakery.t
   -> Limiter.t
-  -> now:(unit -> int)
+  -> now:int
   -> load:bool
   -> peer:Addr.t
   -> string

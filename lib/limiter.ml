@@ -26,8 +26,7 @@ let key = function
   | Ipaddr.V4 v4 -> Ipaddr.V4.to_octets v4
   | Ipaddr.V6 v6 -> String.sub (Ipaddr.V6.to_octets v6) 0 8
 
-let allow t ~now { Addr.ipaddr; _ } =
-  let ts = now () in
+let allow t ~now:ts { Addr.ipaddr; _ } =
   gc t ~now:ts;
   let key = key ipaddr in
   match Hashtbl.find_opt t.tbl key with

@@ -57,7 +57,7 @@ let test01 =
     Option.iter (fun ns -> now := !now + ns) wait;
     let res = ref true in
     let fn addr =
-      let value = Zostera.Limiter.allow limiter ~now:(Fun.const !now) addr in
+      let value = Zostera.Limiter.allow limiter ~now:!now addr in
       res := !res && (allowed = value) in
     List.iter fn ipaddrs;
     Test.check !res
