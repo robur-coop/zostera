@@ -305,7 +305,7 @@ type msg1 =
   ; static : string
   ; timestamp : string }
 
-let step0 ?g ?uid ~now ((_, (_Si_pub, _)) : t)
+let step0 ?g ?uid ~timestamp ((_, (_Si_pub, _)) : t)
   (({ octets= _Sr_pub; _SS; _ } as remote) : remote) =
   let open Digestif in
   (* Ci := Hash(Construction) *)
@@ -334,7 +334,7 @@ let step0 ?g ?uid ~now ((_, (_Si_pub, _)) : t)
   (* let* _SS = dh _Si_priv _Sr_pub in *)
   let _Ci, _k = kdf2 ~ck:_Ci ~ikm:_SS in
   (* msg.timestamp := Aead(k, 0, Timestamp(), Hi) *)
-  let timestamp = aead _k (tai64n ~now) _Hi in
+  let timestamp = aead _k (tai64n ~now:timestamp) _Hi in
   (* Hi := Hash(Hi || msg.timestamp) *)
   let _Hi = mix _Hi timestamp in
   let uid = match uid with

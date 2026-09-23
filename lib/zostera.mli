@@ -179,7 +179,7 @@ type msg1
 val step0 :
      ?g:Mirage_crypto_rng.g
   -> ?uid:Uid.t
-  -> now:int
+  -> timestamp:int
   -> t
   -> remote
   -> ((initiator, pending) handshake * msg1, [> error ]) result
