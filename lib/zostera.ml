@@ -118,7 +118,7 @@ let add_macs ~now (remote : remote) ~off pkt =
   Bytes.blit_string mac1 0 pkt off 16;
   remote.last_mac1 <- Some mac1;
   match remote.cookie with
-  | Some { cookie; birth } when now () < birth + _COOKIE_LIFETIME ->
+  | Some { cookie; birth } when now < birth + _COOKIE_LIFETIME ->
     let mac2 = _mac ~key:cookie (Bytes.unsafe_to_string pkt) ~off:0 ~len:(off + 16) in
     Bytes.blit_string mac2 0 pkt (off + 16) 16
   | _ -> Bytes.blit_string empty 0 pkt (off + 16) 16
@@ -133,7 +133,7 @@ let consume_cookie (remote : remote) ~now ~(uid : Uid.t) pkt =
     let nonce = String.sub pkt 8 24 in
     let str = String.sub pkt 32 32 in
     match xaead_open ~key:remote.cookie_key ~nonce ~adata:mac1 str with
-    | Some cookie -> remote.cookie <- Some { cookie; birth= now () }; Ok ()
+    | Some cookie -> remote.cookie <- Some { cookie; birth= now }; Ok ()
     | None -> Error `Invalid_cookie
 
 type initiator = [ `initiator ]
@@ -225,7 +225,7 @@ type timestamp = string
 let whitener_mask = Int32.sub 0x1000000l 1l
 
 let tai64n ~now =
-  let nsecs = Int64.of_int (now ()) in
+  let nsecs = Int64.of_int now in
   let secs = Int64.div nsecs 1_000_000_000L in
   let tai = Int64.rem nsecs 1_000_000_000L in
   let secs = Int64.add secs 0x400000000000000AL in
@@ -461,7 +461,7 @@ let step1 ?g ?uid ~peer { sender= remote_uid; ephemeral= _Ei_pub; static; timest
   Ok (Responder { _Hr; _Cr; uid; remote_uid; remote; consumed= Atomic.make false; _Er_priv }, msg2)
 
 let msg2_to_string
-  : type a. now:(unit -> int) -> (responder, a) handshake -> msg2 -> string
+  : type a. now:int -> (responder, a) handshake -> msg2 -> string
   = fun ~now (Responder { remote; _ }) { sender; receiver; ephemeral; empty; _ } ->
   (* TODO(dinosaure): check uids from our [state] and [msg2]. *)
   let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
@@ -515,12 +515,12 @@ let uid_of_local { local; _ } = local
 let uid_of_peer { remote; _ } = remote
 let role : type r. (r, _) session -> r role = fun { role; _ } -> role
 
-let session : type r. now:(unit -> int) -> role:r role -> local:Uid.t -> remote:Uid.t -> string -> (r, _) session
+let session : type r. now:int -> role:r role -> local:Uid.t -> remote:Uid.t -> string -> (r, _) session
   = fun ~now ~role ~local ~remote _C ->
   let keys = match role with
     | Initiator -> let send, recv = kdf2 ~ck:_C ~ikm:"" in { send; recv }
     | Responder -> let recv, send = kdf2 ~ck:_C ~ikm:"" in { send; recv } in
-  { local; remote; keys; birth= now ()
+  { local; remote; keys; birth= now
   ; role; counter= ref 0L; window= Window.make ()
   ; confirmed= Atomic.make (is_initiator role) }
 
@@ -578,7 +578,7 @@ let recv ~now { local; keys; birth; window; _ } pkt =
   let* () = guard ~err:(msgf "Unexpected receiver uid") @@ fun () ->
     String.get_int32_le pkt 4 = (local :> int32) in
   let* () = guard ~err:(msgf "Expired session") @@ fun () ->
-    now () - birth < _REJECT_AFTER_TIME in
+    now - birth < _REJECT_AFTER_TIME in
   let counter = String.get_int64_le pkt 8 in
   let* () = guard ~err:(msgf "Exhausted session") @@ fun () ->
     Int64.unsigned_compare counter _REJECT_AFTER_MESSAGES < 0 in
@@ -600,7 +600,7 @@ let _PADDING = 16
 
 let send ~now ({ remote; keys; birth; _ } as session) msg =
   let* () = guard ~err:(msgf "Expired session") @@ fun () ->
-    now () - birth < _REJECT_AFTER_TIME in
+    now - birth < _REJECT_AFTER_TIME in
   let counter = !(session.counter) in
   let* () = guard ~err:(msgf "Exhausted session") @@ fun () ->
     Int64.unsigned_compare counter _REJECT_AFTER_MESSAGES < 0 in

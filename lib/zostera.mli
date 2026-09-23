@@ -85,7 +85,7 @@ val octets_of_remote : remote -> string
 
 val consume_cookie :
      remote
-  -> now:(unit -> int)
+  -> now:int
   -> uid:Uid.t
   -> string
   -> (unit, [> error ]) result
@@ -176,7 +176,7 @@ type msg1
 val step0 :
      ?g:Mirage_crypto_rng.g
   -> ?uid:Uid.t
-  -> now:(unit -> int)
+  -> now:int
   -> t
   -> remote
   -> ((initiator, pending) handshake * msg1, [> error ]) result
@@ -184,7 +184,7 @@ val step0 :
     {!type:msg1} that's the user can send to the {i responder}. *)
 
 val msg1_to_string :
-     now:(unit -> int)
+     now:int
   -> (initiator, pending) handshake
   -> msg1
   -> string
@@ -225,7 +225,7 @@ val step1 :
     to last timestamp when this {i initiator} tried a handshake. *)
 
 val msg2_to_string :
-     now:(unit -> int)
+     now:int
   -> (responder, 'a) handshake
   -> msg2
   -> string
@@ -251,14 +251,14 @@ val uid_of_local : ('role, 'state) session -> Uid.t
 val uid_of_peer : ('role, 'state) session -> Uid.t
 
 val step2 :
-     now:(unit -> int)
+     now:int
   -> msg2
   -> t
   -> (initiator, pending) handshake
   -> ((initiator, confirmed) session, [> error ]) result
 
 val session_of_responder :
-     now:(unit -> int)
+     now:int
   -> (responder, confirmed) handshake
   -> ((responder, pending) session, [> error ]) result
 
@@ -267,25 +267,25 @@ type out =
   | `Data of string ]
 
 val confirm :
-     now:(unit -> int)
+     now:int
   -> (responder, pending) session
   -> string
   -> ((responder, confirmed) session * out, [> error ]) result
 
 val recv :
-     now:(unit -> int)
+     now:int
   -> ('role, confirmed) session
   -> string
   -> (out, [> error ]) result
 
 val send :
-     now:(unit -> int)
+     now:int
   -> ('role, confirmed) session
   -> string
   -> (string, [> error ]) result
 
 val keepalive :
-     now:(unit -> int)
+     now:int
   -> ('role, confirmed) session
   -> (string, [> error ]) result
 
@@ -299,6 +299,6 @@ val keys : ('role, 'state) session -> keys
 
 (**/*)
 
-val tai64n : now:(unit -> int) -> string
+val tai64n : now:int -> string
 (** See https://cr.yp.to/libtai/tai64.html.
     We have 10 years before the world ends. *)

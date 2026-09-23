@@ -1,7 +1,7 @@
 let test00 =
   let descr = {text|tai64n|text} in
   Test.test ~title:"test00" ~descr @@ fun () ->
-  let str0 = Zostera.tai64n ~now:(Fun.const 0) in
+  let str0 = Zostera.tai64n ~now:0 in
   Test.check (str0 = "\x40\x00\x00\x00\x00\x00\x00\x0a\x00\x00\x00\x00");
   let _10ns = 10 in
   let _10us = 10_000 in
@@ -11,10 +11,10 @@ let test00 =
   let tests =
     [ (_10ns, false); (_10us, false); (_1ms, false); (_10ms, false)
     ; (_20ms, true) ] in
-  let str0 = Zostera.tai64n ~now:(Fun.const 123456789) in
+  let str0 = Zostera.tai64n ~now:123456789 in
   let fn (ns, expected) =
     let ns = 123456789 + ns in
-    let str = Zostera.tai64n ~now:(Fun.const ns) in
+    let str = Zostera.tai64n ~now:ns in
     Test.check (Eqaf.compare_be str0 str < 0 = expected) in
   List.iter fn tests
 
