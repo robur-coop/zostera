@@ -591,6 +591,22 @@ let recv ~now { local; keys; birth; window; _ } pkt =
     Window.validate window counter in
   if String.length msg = 0 then Ok `Keepalive else Ok (`Data msg)
 
+(* NOTE(dinosaure): the diff between [recv] and [confirm] is about confirming
+   the handshake. The WireGuard paper mentions it when it says: "But, keep in
+   mind that after an initiator receives a handshake response message, the
+   responder **cannot** send transport data messages until it has received the
+   first transport data message from the initiator (§ 6.3)."
+
+   {[
+     val confirm :
+          now:int
+       -> (responder, pending) session
+       -> string
+       -> ((responder, confirmed) session * out, [> error ]) result
+   ]}
+
+   In the signature above, only a received data packet can set the state of
+   the given session from [pending] to [confirmed]. *)
 let confirm ~now session pkt =
   let* data = recv ~now session pkt in
   let* () = guard ~err:(msgf "Session already confirmed") @@ fun () ->
@@ -630,10 +646,13 @@ let _REKEY_AFTER_TIME = 120_000_000_000
 let _REKEY_TIMEOUT = 5_000_000_000
 let _KEEPALIVE_TIMEOUT = 10_000_000_000
 
+(* NOTE(dinosaure): see WireGuard § 6.2 *)
+
 let rekey_on_send ~now { birth; counter; role; _ } =
-  Int64.unsigned_compare !counter _REKEY_AFTER_MESSAGES >= 0
+  Int64.unsigned_compare !counter _REKEY_AFTER_MESSAGES > 0
   || (is_initiator role && now - birth >= _REKEY_AFTER_TIME)
 
+(* NOTE(dinosaure): the time-based opportunistic rekeying is restricted to the initiator. *)
 let rekey_on_recv ~now ({ birth; _ } : (initiator, _) session) =
   now - birth >= _REJECT_AFTER_TIME - _KEEPALIVE_TIMEOUT - _REKEY_TIMEOUT
 

@@ -195,7 +195,12 @@ let on_msg1 t ~now ~load ~from pkt =
     let forget = cons_if_some (uid_of_session `Prev peer) forget in
     let forget = cons_if_some (uid_of_session `Next peer) forget in
     let forget = List.map (fun uid -> `Forget uid) forget in
-    (* NOTE(dinosaure): and replace [next] by [Some session] (from [session_of_responder]. *)
+    (* NOTE(dinosaure): and replace [next] by [Some session] (from
+       [session_of_responder]).
+
+       § 6.3:
+       > Every time a new secure session is created, for the responder, the
+       > [next] slot is used _interstitially_ until the handshake is confirmed. *)
     let peer = { peer with prev= None; next= Some session; last_handshake= Some now } in
     (* NOTE(dinosaure): do [forget] first, [`Register] then and [`Send]. *)
     let r_events = (`Send (from, pkt) :: `Register uid :: forget) in
@@ -267,6 +272,10 @@ let on_cookie ~now uid peer pkt =
    let* () = Zostera.consume_cookie peer.remote ~now ~uid pkt in
    Ok (peer, [])
 
+(* NOTE(dinosaure): here, we rotate sessions:
+   - the [t.curr] session becomes [t.prev]
+   - the given session is new new [t.curr] session
+   - [t.next] becomes [None] in any cases *)
 let rotate ~now peer session =
   let forget = cons_if_some (uid_of_session `Prev peer) [] in
   let forget = List.map (fun uid -> `Forget uid) forget in
@@ -276,6 +285,7 @@ let rotate ~now peer session =
   let peer = { peer with prev; curr= Some (Current session); next= None } in
   flush ~now ~keepalive:false peer forget
 
+(* See [timers.go]/[JitterMaxMs]. *)
 let jitter t =
   let buf = Mirage_crypto_rng.generate ?g:t.g 2 in
   (String.get_uint16_le buf 0 mod 334) * 1_000_000 (* [0, 333] ms *)
@@ -284,6 +294,8 @@ let initiation t ~timestamp ~now ~first peer edn r_events =
   let uid = fresh t in
   let* state, msg1 = Zostera.step0 ?g:t.g ~uid ~timestamp t.identity peer.remote in
   let pkt = Zostera.msg1_to_string ~now state msg1 in
+  (* NOTE(dinosaure): WireGuard mentions an exponential backoff instead of
+     [_REKEY_TIMEOUT]. *)
   let retry_at = now + _REKEY_TIMEOUT + jitter t in
   let handshake = Some { state; first; retry_at } in
   let peer =
@@ -302,7 +314,11 @@ let initiate t ~timestamp ~now peer r_events =
   | Some _, _ -> Ok (peer, r_events) (* NOTE(dinosaurte): already in-handshake *)
   | None, _ when recently_sent_handshake peer now -> Ok (peer, r_events) (* NOTE(dinosaure): already sent [msg1]/[msg2] the last 5s. *)
   | None, None -> error_msgf "Unknown endpoint"
-  | None, Some edn -> initiation t ~timestamp ~now ~first:now peer edn r_events
+  | None, Some edn ->
+    (* "if a handshake response message is not subsequently received after
+        [_REKEY_TIMEOUT] seconds, a new handshake initiation message is
+        constructed and sent." (§ 6.4). See also [retransmit]. *)
+    initiation t ~timestamp ~now ~first:now peer edn r_events
 
 let maybe_rekey_on_recv t ~timestamp ~now peer r_events =
   match peer.curr with
@@ -375,6 +391,12 @@ let maybe_rekey_on_send t ~timestamp ~now peer r_events =
     | Error err -> peer, `Error err :: r_events end
   | Some _ | None -> peer, r_events
 
+(* About [enqueue] and [write], § 6.4:
+
+   > The first time the user sends a packet over a WireGuard interface, the
+   > packet cannot immediately be sent, because no current session exists. So,
+   > after queuing the packet, WireGuard sends a handshake initiation message.
+*)
 let enqueue t ~timestamp ~now peer data r_events =
   let queue, dropped = Q.push data peer.queue in
   let peer = { peer with queue } in
@@ -392,6 +414,10 @@ let write t ~timestamp ~now public = function
     let* peer = Option.to_result ~none:(msgf "Unknown peer") (Hashtbl.find_opt t.peers key) in
     let peer, r_events = match peer.curr with
       | Some (Current session as curr) when not (Zostera.expired ~now session) ->
+        (* NOTE(dinosaure): we can have an error due to:
+           - [peer.edn] is not set
+           - the session is expired (which should not occur), see [expired]
+           - the session is exhausted (which should not occur), see [expired] *)
         begin match send ~now peer curr data [] with
         | Ok (peer, r_events) -> maybe_rekey_on_send t ~timestamp ~now peer r_events
         | Error _ -> enqueue t ~timestamp ~now peer data [] end
@@ -406,6 +432,12 @@ let drop peer r_events =
   let r_events = List.fold_left fn r_events (Q.to_list peer.queue) in
   ({ peer with queue= Q.empty }, r_events)
 
+(* § 6.3:
+   > If no new secure session is created after [_REJECT_AFTER_TIME × 3]
+   > seconds, the current secure session, the previous secure session, and
+   > potentially the next secure session are discarded and zeroed out, in
+   > addition to any possible partially-completed handshake states and
+   > ephemeral keys. *)
 let zero_keys peer r_events =
   let forget = List.map (fun uid -> `Forget uid) (uids peer) in
   let peer, r_events = drop peer (List.rev_append forget r_events) in
@@ -449,6 +481,16 @@ let tick t ~timestamp ~now peer =
         then give_up peer r_events
         else retransmit t ~timestamp ~now peer hshk r_events
       | _ -> peer, r_events in
+    (* § 6.5:
+       > If a peer has received has received a validly-authenticated transport
+       > data message, but does not have any packets itself to send back for
+       > [_KEEPALIVE_TIMEOUT] seconds, it sends a _keepalive message_.
+
+       [keepalive_at] is armed only when we receive data (see [on_data]).
+       It sets to [None] on:
+       - [on_msg1] after an authenticated [msg1] (responder)
+       - on [send] (if we have no failures) (initiator & responder)
+       - on [initiation] (if we have no failures) (initiator) *)
     let peer, r_events =
       if due now peer.keepalive_at
       then passive_keepalive ~now peer r_events
