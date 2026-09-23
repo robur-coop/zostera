@@ -292,9 +292,9 @@ val keepalive :
   -> ('role, confirmed) session
   -> (string, [> error ]) result
 
-val expired : now:(unit -> int) -> ('role, 'state) session -> bool
-val rekey_on_send : now:(unit -> int) -> ('role, 'state) session -> bool
-val rekey_on_recv : now:(unit -> int) -> (initiator, 'state) session -> bool
+val expired : now:int -> ('role, 'state) session -> bool
+val rekey_on_send : now:int -> ('role, 'state) session -> bool
+val rekey_on_recv : now:int -> (initiator, 'state) session -> bool
 
 type keys = { send : string; recv : string }
 

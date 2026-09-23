@@ -622,7 +622,7 @@ let send ~now ({ remote; keys; birth; _ } as session) msg =
 let keepalive ~now session = send ~now session String.empty
 
 let expired ~now { birth; counter; _ } =
-  now () - birth >= _REJECT_AFTER_TIME
+  now - birth >= _REJECT_AFTER_TIME
   || Int64.unsigned_compare !counter _REJECT_AFTER_MESSAGES >= 0
 
 let _REKEY_AFTER_MESSAGES = 0x1000000000000000L
@@ -632,10 +632,10 @@ let _KEEPALIVE_TIMEOUT = 10_000_000_000
 
 let rekey_on_send ~now { birth; counter; role; _ } =
   Int64.unsigned_compare !counter _REKEY_AFTER_MESSAGES >= 0
-  || (is_initiator role && now () - birth >= _REKEY_AFTER_TIME)
+  || (is_initiator role && now - birth >= _REKEY_AFTER_TIME)
 
 let rekey_on_recv ~now ({ birth; _ } : (initiator, _) session) =
-  now () - birth >= _REJECT_AFTER_TIME - _KEEPALIVE_TIMEOUT - _REKEY_TIMEOUT
+  now - birth >= _REJECT_AFTER_TIME - _KEEPALIVE_TIMEOUT - _REKEY_TIMEOUT
 
 let keys { keys; _ } = keys
 
