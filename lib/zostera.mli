@@ -83,6 +83,9 @@ val octets_of_remote : remote -> string
 (** [octets_of_remote remote] returns the serialized form of the remote
     identity's public key. *)
 
+val public_of_remote : remote -> public
+(** [public_of_remote] returns the remote identity's public key. *)
+
 val consume_cookie :
      remote
   -> now:int

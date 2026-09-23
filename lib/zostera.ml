@@ -297,6 +297,7 @@ let remote ?psk:(_Q= _Q) (_S_priv, _) ((octets, mac1_key) as public : public) =
 
 let remote_of_octets ?psk t str = remote ?psk t (public_of_octets str)
 let octets_of_remote { octets; _ } = octets
+let public_of_remote { octets; _ } = public_of_octets octets
 
 type msg1 =
   { sender : Uid.t
