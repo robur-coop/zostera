@@ -1,4 +1,5 @@
 (library
  (name zostera)
- (modules zostera limiter addr window)
+ (modules zostera uid limiter addr window)
+ (public_name zostera)
  (libraries ipaddr digestif.c ohex mirage-crypto-rng.unix fmt mirage-crypto-ec kdf.hkdf))

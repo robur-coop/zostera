@@ -20,16 +20,7 @@ type error = [ `Msg of string | `Invalid_cookie | Mirage_crypto_ec.error ]
 val pp_error : error Fmt.t
 (** Pretty printer for {!type:error} values. *)
 
-(** {2 Unique ID.}
-
-    A 32-bit index that locally represents the other peer, analogous to IPsec's
-    "SPI". *)
-
-type uid = private int32
-(** Type of unique IDs. *)
-
-val uid : ?g:Mirage_crypto_rng.g -> unit -> uid
-(** [uid ?g ()] generates a new unique ID. *)
+module Uid = Uid
 
 (** {2 Pre-shared Symmetric Key.}
 
@@ -95,7 +86,7 @@ val octets_of_remote : remote -> string
 val consume_cookie :
      remote
   -> now:(unit -> int)
-  -> uid:uid
+  -> uid:Uid.t
   -> string
   -> (unit, [> error ]) result
 (** [consume_cookie remote ~now ~uid pkt] validates the received cookie from
@@ -164,15 +155,19 @@ type timestamp
 val newer : timestamp -> timestamp -> bool
 (** [newer t0 t1] returns [true] if [t0 < t1]. Otherwise, it returns [false]. *)
 
-type initiator
-type responder
+type initiator = private [ `initiator ]
+type responder = private [ `responder ]
 
 type pending
 type confirmed
 
 type ('role, 'state) handshake
 
-val uid_of_initiator : (initiator, pending) handshake -> uid
+type 'role role =
+  | Initiator : initiator role
+  | Responder : responder role
+
+val uid_of_initiator : (initiator, pending) handshake -> Uid.t
 
 type msg1
 (** Type of the first message that an {i initiator} should send to the
@@ -180,6 +175,7 @@ type msg1
 
 val step0 :
      ?g:Mirage_crypto_rng.g
+  -> ?uid:Uid.t
   -> now:(unit -> int)
   -> t
   -> remote
@@ -215,6 +211,7 @@ type msg2
 
 val step1 :
      ?g:Mirage_crypto_rng.g
+  -> ?uid:Uid.t
   -> peer:(public -> [ `Accept of remote * timestamp option * (timestamp -> unit)
                      | `Reject ])
   -> msg1
@@ -249,8 +246,9 @@ val msg2_of_string :
 
 type ('a, 'state) session
 
-val uid_of_local : ('role, 'state) session -> uid
-val uid_of_peer : ('role, 'state) session -> uid
+val role : ('role, 'state) session -> 'role role
+val uid_of_local : ('role, 'state) session -> Uid.t
+val uid_of_peer : ('role, 'state) session -> Uid.t
 
 val step2 :
      now:(unit -> int)
@@ -292,7 +290,8 @@ val keepalive :
   -> (string, [> error ]) result
 
 val expired : now:(unit -> int) -> ('role, 'state) session -> bool
-val rekey : now:(unit -> int) -> ('role, 'state) session -> bool
+val rekey_on_send : now:(unit -> int) -> ('role, 'state) session -> bool
+val rekey_on_recv : now:(unit -> int) -> (initiator, 'state) session -> bool
 
 type keys = { send : string; recv : string }
 

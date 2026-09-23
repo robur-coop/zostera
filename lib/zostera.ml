@@ -56,6 +56,7 @@ let xaead_open ~key ~nonce ?adata msg =
 module Addr = Addr
 module Limiter = Limiter
 module Window = Window
+module Uid = Uid
 
 (* NOTE(dinosaure): [B2s] gives to us the real access to the BLAKE2S implementation
    just because [Digestif.Make_BLAKE2S] does not expose [Keyed]... *)
@@ -91,12 +92,6 @@ let pp_error ppf = function
   | `Msg msg -> Fmt.string ppf msg
   | `Invalid_cookie -> Fmt.string ppf "Invalid cookie"
 
-type uid = int32
-
-let uid ?g () =
-  let tmp = Mirage_crypto_rng.generate ?g 4 in
-  String.get_int32_be tmp 0
-
 let _COOKIE_LIFETIME = 120_000_000_000
 
 let cookie_key_of_public (_S_pub, _) =
@@ -128,11 +123,11 @@ let add_macs ~now (remote : remote) ~off pkt =
     Bytes.blit_string mac2 0 pkt (off + 16) 16
   | _ -> Bytes.blit_string empty 0 pkt (off + 16) 16
 
-let consume_cookie (remote : remote) ~now ~uid pkt =
+let consume_cookie (remote : remote) ~now ~(uid : Uid.t) pkt =
   let* mac1 = Option.to_result ~none:`Invalid_cookie remote.last_mac1 in
   if String.length pkt <> 64
   || String.get_int32_le pkt 0 <> 3l
-  || String.get_int32_le pkt 4 <> uid
+  || String.get_int32_le pkt 4 <> (uid :> int32)
   then Error `Invalid_cookie
   else
     let nonce = String.sub pkt 8 24 in
@@ -141,8 +136,8 @@ let consume_cookie (remote : remote) ~now ~uid pkt =
     | Some cookie -> remote.cookie <- Some { cookie; birth= now () }; Ok ()
     | None -> Error `Invalid_cookie
 
-type initiator = Initiator
-type responder = Responder
+type initiator = [ `initiator ]
+type responder = [ `responder ]
 
 type pending = |
 type confirmed = |
@@ -150,15 +145,15 @@ type confirmed = |
 type ('role, 'state) handshake =
   | Initiator : { _Hi : Digestif.BLAKE2S.t
     ; _Ci : string
-    ; uid : uid
+    ; uid : Uid.t
     ; remote : remote
     ; consumed : bool Atomic.t
     ; _Ei_priv : Mirage_crypto_ec.X25519.secret } -> (initiator, pending) handshake
   | Responder : { _Hr : Digestif.BLAKE2S.t
     ; _Cr : string
-    ; remote_uid : uid
+    ; remote_uid : Uid.t
     ; remote : remote
-    ; uid : uid
+    ; uid : Uid.t
     ; consumed : bool Atomic.t
     ; _Er_priv : Mirage_crypto_ec.X25519.secret } -> (responder, confirmed) handshake
 
@@ -305,12 +300,12 @@ let remote_of_octets ?psk t str = remote ?psk t (public_of_octets str)
 let octets_of_remote { octets; _ } = octets
 
 type msg1 =
-  { sender : uid
+  { sender : Uid.t
   ; ephemeral : string
   ; static : string
   ; timestamp : string }
 
-let step0 ?g ~now ((_, (_Si_pub, _)) : t)
+let step0 ?g ?uid ~now ((_, (_Si_pub, _)) : t)
   (({ octets= _Sr_pub; _SS; _ } as remote) : remote) =
   let open Digestif in
   (* Ci := Hash(Construction) *)
@@ -342,14 +337,16 @@ let step0 ?g ~now ((_, (_Si_pub, _)) : t)
   let timestamp = aead _k (tai64n ~now) _Hi in
   (* Hi := Hash(Hi || msg.timestamp) *)
   let _Hi = mix _Hi timestamp in
-  let uid = uid ?g () in
+  let uid = match uid with
+    | Some uid -> uid
+    | None -> Uid.gen ?g () in
   let msg1 = { sender= uid; ephemeral; static; timestamp } in
   Ok (Initiator { _Hi; _Ci; uid; remote; consumed= Atomic.make false; _Ei_priv }, msg1)
 
 let msg1_to_string ~now (Initiator { uid; remote; _ }) { ephemeral; static; timestamp; _ } =
   let pkt = Bytes.make (1 + 3 + 4 + 32 + 48 + 28 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 1;
-  Bytes.set_int32_le pkt 4 uid;
+  Bytes.set_int32_le pkt 4 (uid :> int32);
   Bytes.blit_string ephemeral 0 pkt 8 32;
   Bytes.blit_string static 0 pkt 40 48;
   Bytes.blit_string timestamp 0 pkt 88 28;
@@ -397,18 +394,19 @@ let msg1_of_string ?g bakery limiter ~now ~load ~peer pkt =
   | `Cookie _ as cookie -> Ok cookie
   | `Ok ->
     let uid = String.get_int32_le pkt 4 in
+    let uid = Uid.unsafe_of_int32 uid in
     let ephemeral = String.sub pkt 8 32 in
     let static = String.sub pkt 40 48 in
     let timestamp = String.sub pkt 88 28 in
     Ok (`Msg1 { sender= uid; ephemeral; static; timestamp; })
 
 type msg2 =
-  { sender : uid
-  ; receiver : uid
+  { sender : Uid.t
+  ; receiver : Uid.t
   ; ephemeral : string
   ; empty : string }
 
-let step1 ?g ~peer { sender= remote_uid; ephemeral= _Ei_pub; static; timestamp; } (_Sr_priv, (_Sr_pub, _)) =
+let step1 ?g ?uid ~peer { sender= remote_uid; ephemeral= _Ei_pub; static; timestamp; } (_Sr_priv, (_Sr_pub, _)) =
   let open Digestif in
   let _Cr = BLAKE2S.digest_string "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s" in
   let _Hr = mix _Cr "WireGuard v1 zx2c4 Jason@zx2c4.com" in
@@ -457,7 +455,9 @@ let step1 ?g ~peer { sender= remote_uid; ephemeral= _Ei_pub; static; timestamp; 
   let empty = aead _k "" _Hr in
   (* Hr := Hash(Hr || msg.empty) *)
   let _Hr = mix _Hr empty in
-  let uid = uid ?g () in
+  let uid = match uid with
+    | Some uid -> uid
+    | None -> Uid.gen ?g () in
   let msg2 = { sender= uid; receiver= remote_uid; ephemeral; empty } in
   Ok (Responder { _Hr; _Cr; uid; remote_uid; remote; consumed= Atomic.make false; _Er_priv }, msg2)
 
@@ -467,8 +467,8 @@ let msg2_to_string
   (* TODO(dinosaure): check uids from our [state] and [msg2]. *)
   let pkt = Bytes.make (1 + 3 + 4 + 4 + 32 + 16 + 16 + 16) '\000' in
   Bytes.set_uint8 pkt 0 2;
-  Bytes.set_int32_le pkt 4 sender;
-  Bytes.set_int32_le pkt 8 receiver;
+  Bytes.set_int32_le pkt 4 (sender :> int32);
+  Bytes.set_int32_le pkt 8 (receiver :> int32);
   Bytes.blit_string ephemeral 0 pkt 12 32;
   Bytes.blit_string empty 0 pkt 44 16;
   add_macs ~now remote ~off:60 pkt;
@@ -484,38 +484,46 @@ let msg2_of_string ?g bakery limiter ~now ~load ~peer pkt =
   | `Cookie _ as cookie -> Ok cookie
   | `Ok ->
     let uid0 = String.get_int32_le pkt 4 in
+    let sender = Uid.unsafe_of_int32 uid0 in
     let uid1 = String.get_int32_le pkt 8 in
+    let receiver = Uid.unsafe_of_int32 uid1 in
     let ephemeral = String.sub pkt 12 32 in
     let empty = String.sub pkt 44 16 in
-    Ok (`Msg2 ({ sender= uid0; receiver= uid1; ephemeral; empty }))
-
-type role =
-  | Initiator
-  | Responder
+    Ok (`Msg2 ({ sender; receiver; ephemeral; empty }))
 
 type keys = { send : string; recv : string }
 type window = Window.t
 
+type 'role role =
+  | Initiator : initiator role
+  | Responder : responder role
+
+let is_initiator : type r. r role -> bool = function
+  | Initiator -> true
+  | Responder -> false
+
 type ('role, 'state) session =
-  { local : uid
-  ; remote : uid
+  { local : Uid.t
+  ; remote : Uid.t
   ; keys : keys
   ; birth : int
-  ; role : role
+  ; role : 'role role
   ; counter : int64 ref
   ; window : window
   ; confirmed : bool Atomic.t }
 
 let uid_of_local { local; _ } = local
 let uid_of_peer { remote; _ } = remote
+let role : type r. (r, _) session -> r role = fun { role; _ } -> role
 
-let session ~now ~role ~local ~remote _C =
+let session : type r. now:(unit -> int) -> role:r role -> local:Uid.t -> remote:Uid.t -> string -> (r, _) session
+  = fun ~now ~role ~local ~remote _C ->
   let keys = match role with
     | Initiator -> let send, recv = kdf2 ~ck:_C ~ikm:"" in { send; recv }
     | Responder -> let recv, send = kdf2 ~ck:_C ~ikm:"" in { send; recv } in
   { local; remote; keys; birth= now ()
   ; role; counter= ref 0L; window= Window.make ()
-  ; confirmed= Atomic.make (role = Initiator) }
+  ; confirmed= Atomic.make (is_initiator role) }
 
 let step2 ~now { sender; receiver; ephemeral= _Er_pub; empty } (_Si_priv, _Si_pub)
   (Initiator { _Ci; _Hi; uid; remote= { _Q; _ }; consumed; _Ei_priv } : (initiator, _) handshake) =
@@ -569,7 +577,7 @@ let recv ~now { local; keys; birth; window; _ } pkt =
   let* () = guard ~err:(msgf "Invalid data packet") @@ fun () ->
     String.get_int32_le pkt 0 = 4l in
   let* () = guard ~err:(msgf "Unexpected receiver uid") @@ fun () ->
-    String.get_int32_le pkt 4 = local in
+    String.get_int32_le pkt 4 = (local :> int32) in
   let* () = guard ~err:(msgf "Expired session") @@ fun () ->
     now () - birth < _REJECT_AFTER_TIME in
   let counter = String.get_int64_le pkt 8 in
@@ -606,7 +614,7 @@ let send ~now ({ remote; keys; birth; _ } as session) msg =
   let pkt = Bytes.make (16 + String.length txt) '\000' in
   (* TODO(dinosaure): use authenticate_encrypt_into *)
   Bytes.set_uint8 pkt 0 4;
-  Bytes.set_int32_le pkt 4 remote;
+  Bytes.set_int32_le pkt 4 (remote :> int32);
   Bytes.set_int64_le pkt 8 counter;
   Bytes.blit_string txt 0 pkt 16 (String.length txt);
   Ok (Bytes.unsafe_to_string pkt)
@@ -622,11 +630,12 @@ let _REKEY_AFTER_TIME = 120_000_000_000
 let _REKEY_TIMEOUT = 5_000_000_000
 let _KEEPALIVE_TIMEOUT = 10_000_000_000
 
-let rekey ~now { role; birth; counter; _ } =
+let rekey_on_send ~now { birth; counter; role; _ } =
   Int64.unsigned_compare !counter _REKEY_AFTER_MESSAGES >= 0
-  || match role with
-     | Initiator -> now () - birth >= _REKEY_AFTER_TIME
-     | Responder -> now () - birth >= _REJECT_AFTER_TIME - _KEEPALIVE_TIMEOUT - _REKEY_TIMEOUT
+  || (is_initiator role && now () - birth >= _REKEY_AFTER_TIME)
+
+let rekey_on_recv ~now ({ birth; _ } : (initiator, _) session) =
+  now () - birth >= _REJECT_AFTER_TIME - _KEEPALIVE_TIMEOUT - _REKEY_TIMEOUT
 
 let keys { keys; _ } = keys
 
