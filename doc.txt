@@ -1,0 +1,26 @@
+- si un paquet arrive mais qu'il fait pas partie de la liste des trucs qu'on alloue,
+  on refuse et on envoie un paquet ICMP
+- un paquet must have a endpoint (peer.edn)
+- something to do on the IP level ECN `ip_tunnel_ecn_encap(0, ip_header)`
+- check also the DSCP bits on the IP layer when we receive packets
+- when we receive: decrypt and ONLY THEN validate counter
+- only set [peer.edn] only after decrypt and validation of counter
+- responder ne peut pas parler a l'initiator avant de recevoir le paquet data, on doit queue et si on recoit (see confirm), on balance tout la queue du responder
+- quand on recoit, on doit armer les trigger received/traversal même pour les keepalive paquet recu
+- INET_ECN_decapsulate (we keep the same value as the one we receive)
+
+Send:
+  outer->ds = INET_ECN_encapsulate(inner->ds, TOS=0)
+Recv:
+  inner->ds = INET_ECN_decapsulate(outer->ds)
+
+- verifier que le peer qu'on trouve a partir de l'IP source est le même que celui qu'on manipule
+- set the DSCP to 0x88 /* AF41 plus 00 ECN */ for msg1 and msg2
+- for the under load, it's when we have 4096 / 8 handshakes and we are under load for 1 seconds
+- should take a look on virtio clone for Solo5
+- wireguard can not talk to himself (same private key)
+- when we have persistent keep alive and we add a new peer, we send directly to it a keepalive packet
+- hashtbl look timing time
+
+- il y a du code pour le replay attach and flood attack après le decrypt dans wireguard qu'il faut reprendre
+- clamp every secret key
