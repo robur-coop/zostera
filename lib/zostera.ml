@@ -624,6 +624,7 @@ let send ~now ({ remote; keys; birth; _ } as session) msg =
   session.counter := Int64.add counter 1L;
   let len = String.length msg in
   let pad = (_PADDING - (len mod _PADDING)) land (_PADDING - 1) in
+  (* TODO(dinosaure): don't overflow the MTU *)
   let buf = Bytes.make (len + pad) '\000' in
   Bytes.blit_string msg 0 buf 0 len;
   let txt = encrypt_data ~key:keys.send ~counter (Bytes.unsafe_to_string buf) in

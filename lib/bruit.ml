@@ -164,6 +164,30 @@ let fresh t =
     then go () else uid in
   go ()
 
+(* NOTE(dinosaure): about rotation
+
+when the handshake is done:
+initiator
+  if next != null
+    next <- null
+    curr <- new
+    prev <- next
+  else
+    prev <- curr
+    curr <- new
+
+responder
+  next <- new
+  prev <- null
+
+when we receive date packet:
+delete(old)
+prev <- curr
+curr <- new (and new == next)
+next <- null
+
+*)
+
 (* In *)
 
 let on_msg1 t ~now ~load ~from pkt =
@@ -275,7 +299,9 @@ let on_cookie ~now uid peer pkt =
 (* NOTE(dinosaure): here, we rotate sessions:
    - the [t.curr] session becomes [t.prev]
    - the given session is new new [t.curr] session
-   - [t.next] becomes [None] in any cases *)
+   - [t.next] becomes [None] in any cases
+
+   TODO(dinosaure): it seems that when we have a next, it becomes the previous.*)
 let rotate ~now peer session =
   let forget = cons_if_some (uid_of_session `Prev peer) [] in
   let forget = List.map (fun uid -> `Forget uid) forget in
