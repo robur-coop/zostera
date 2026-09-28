@@ -528,7 +528,7 @@ let purge_staged_packets peer r_events =
 
 (* [wg_queued_expired_zero_key_material], § 6.3:
 
-   > If no new secure session is created after [REJECT_AFTER_TIME × 3]
+   > If no new secure session is created after [REJECT_AFTER_TIME * 3]
    > seconds, the current secure session, the previous secure session, and
    > potentially the next secure session are discarded and zeroed out, in
    > addition to any possible partially-completed handshake states and
