@@ -1,5 +1,3 @@
-[@@@warning "-27-32-34-37"]
-
 let msgf fmt = Fmt.kstr (fun msg -> `Msg msg) fmt
 let guard ~err fn = if fn () then Ok () else Error err
 let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
@@ -16,27 +14,17 @@ type previous =
   | Confirmed : ('r, confirmed) session -> previous
   | Unconfirmed : (responder, pending) session -> previous
 
-type handshake =
-  { state : (initiator, pending) Zostera.handshake
-  ; first : int (* first try *)
-  ; retry_at : int (* sent + REKEY_TIMEOUT + jitter *) }
-
 module Q = struct
   type 'a t = { front : 'a list; back : 'a list; len : int }
 
   let empty = { front= []; back= []; len= 0 }
   let is_empty { len; _ } = len = 0
   let to_list t = t.front @ List.rev t.back
-  let unsafe_of_list lst = { front= lst; back= []; len= List.length lst }
 
   let norm = function
     | { front= []; back; len } ->
       { front= List.rev back; back= []; len }
     | t -> t
-
-  let peek = function
-    | { front= []; _ } -> None
-    | { front= x :: _; _ } -> Some x
 
   let pop = function
     | { front= []; _ } -> None
@@ -51,21 +39,20 @@ module Q = struct
     norm { t with back= x :: t.back; len= t.len + 1 }, dropped
 end
 
+(* NOTE(dinosaure): [queue] is the [staged_packet_queue] of Linux. An empty
+   string is a staged keepalive. *)
 type peer =
   { remote : remote
   ; edn : Addr.t option
   ; timestamp : timestamp option
+  ; last_initiation_consumption : int option
   ; prev : previous option
   ; curr : current option
   ; next : (responder, pending) session option
-  ; handshake : handshake option
-  ; last_handshake : int option
-  ; last_handshake_sent : int option
+  ; handshake : (initiator, pending) Zostera.handshake option
   ; last_sent : int option
   ; last_recv : int option
-  ; keepalive_at : int option
-  ; new_handshake_at : int option
-  ; zero_keys_at : int option 
+  ; timers : Timers.t
   ; queue : string Q.t }
 
 type t =
@@ -74,10 +61,11 @@ type t =
   ; limiter : Limiter.t
   ; peers : (string, peer) Hashtbl.t
   ; index : (Uid.t, string) Hashtbl.t
+  ; mutable last_under_load : int option
   ; g : Mirage_crypto_rng.g option }
 
 type action =
-  [ `Send of Zostera.Addr.t * string 
+  [ `Send of Zostera.Addr.t * string
   | `Deliver of Zostera.public * string
   | `Drop of Zostera.public * string
   | `Error of error ]
@@ -89,39 +77,32 @@ type event =
 
 let forget uid = `Forget uid
 
-let _KEEPALIVE_TIMEOUT = 10_000_000_000
-let _REKEY_AFTER_TIME = 120_000_000_000
-let _REKEY_ATTEMPT_TIME = 90_000_000_000
-let _REKEY_TIMEOUT = 5_000_000_000
-let _REJECT_AFTER_TIME = 180_000_000_000
-
 let create ?g identity =
   { identity; bakery= Bakery.create ?g ~me:identity (); limiter= Limiter.create ()
-  ; peers= Hashtbl.create 0x7ff; index= Hashtbl.create 0x7ff; g }
+  ; peers= Hashtbl.create 0x7ff; index= Hashtbl.create 0x7ff
+  ; last_under_load= None; g }
 
-let add ?psk ?edn t public =
-  let* remote = Zostera.remote ?psk t.identity public in
-  let timestamp = None
-  and prev = None and curr = None and next = None and handshake = None
-  and last_handshake = None and last_handshake_sent = None
-  and last_sent = None and last_recv = None
-  and keepalive_at = None and new_handshake_at = None and zero_keys_at = None
-  and queue = Q.empty in
-  let peer =
-    { remote; edn; timestamp; prev; curr; next; handshake
-    ; last_handshake; last_handshake_sent
-    ; last_sent; last_recv
-    ; keepalive_at; new_handshake_at; zero_keys_at
-    ; queue } in
-  let key = Zostera.octets_of_public public in
-  let* () = guard ~err:(msgf "The given peer already exists") @@ fun () ->
-    Hashtbl.mem t.peers key = false in
-  Hashtbl.replace t.peers key peer;
-  Ok ()
+let _MAX_QUEUED_INCOMING_HANDSHAKES = 4096
+let _INITIATIONS_PER_SECOND = 50
+
+(* See [wg_receive_handshake_packet]. We are under load when [pending]
+   handshake packets (not yet processed by the user) reach
+   [MAX_QUEUED_INCOMING_HANDSHAKES / 8], and we stay under load for one second
+   after the last time it happened. *)
+let under_load t ~now ~pending =
+  if pending >= _MAX_QUEUED_INCOMING_HANDSHAKES / 8 then begin
+    t.last_under_load <- Some now;
+    true end
+  else match t.last_under_load with
+    | None -> false
+    | Some at ->
+      let under_load = now - at < 1_000_000_000 in
+      if not under_load then t.last_under_load <- None;
+      under_load
 
 let uid_of_session which peer =
   match which, peer.handshake, peer.prev, peer.curr, peer.next with
-  | `Hshk, Some { state; _ }, _, _, _ -> Some (Zostera.uid_of_initiator state)
+  | `Hshk, Some state, _, _, _ -> Some (Zostera.uid_of_initiator state)
   | `Prev, _, Some (Confirmed s), _, _ -> Some (Zostera.uid_of_local s)
   | `Prev, _, Some (Unconfirmed s), _, _ -> Some (Zostera.uid_of_local s)
   | `Curr, _, _, Some (Current s), _ -> Some (Zostera.uid_of_local s)
@@ -164,38 +145,172 @@ let fresh t =
     then go () else uid in
   go ()
 
-(* NOTE(dinosaure): about rotation
+(* See [timers.go]/[JitterMaxMs] and [REKEY_TIMEOUT_JITTER_MAX_JIFFIES]. *)
+let jitter t =
+  let buf = Mirage_crypto_rng.generate ?g:t.g 2 in
+  (String.get_uint16_le buf 0 mod 334) * 1_000_000 (* [0, 333] ms *)
 
-when the handshake is done:
-initiator
-  if next != null
-    next <- null
-    curr <- new
-    prev <- next
+(* NOTE(dinosaure): about timers.
+
+   Every timer-related field lives into [peer.timers] (see [Timers]) and hooks
+   are called at the same places as Linux does into [send.c] and [receive.c].
+   The name of the Linux function is given above each of our functions.
+
+   On Linux, sending packets is asynchronous (workqueues): the timer hooks of
+   an emission ([any_authenticated_packet_sent], [data_sent]) are executed
+   {i after} the hooks of the reception which triggered it. We are synchronous,
+   so we reproduce this order by applying reception hooks first and emitting
+   packets then. *)
+
+(* Out *)
+
+(* [wg_packet_send_handshake_initiation] *)
+let send_handshake_initiation t ~timestamp ~now peer edn r_events =
+  if not (Timers.can_send_handshake ~now peer.timers) then (peer, r_events)
   else
-    prev <- curr
-    curr <- new
+    let uid = fresh t in
+    match Zostera.step0 ?g:t.g ~uid ~timestamp t.identity peer.remote with
+    | Error err -> (peer, `Error err :: r_events)
+    | Ok (state, msg1) ->
+      let pkt = Zostera.msg1_to_string ~now state msg1 in
+      (* NOTE(dinosaure): a new initiation replaces the previous one. *)
+      let r_events = cons_if_some (Option.map forget (uid_of_session `Hshk peer)) r_events in
+      let timers =
+        peer.timers
+        |> Timers.any_authenticated_packet_traversal ~now
+        |> Timers.any_authenticated_packet_sent
+        |> Timers.handshake_sent ~now
+        |> Timers.handshake_initiated ~now ~jitter:(jitter t) in
+      let peer = { peer with handshake= Some state; last_sent= Some now; timers } in
+      (peer, `Send (edn, pkt) :: `Register uid :: r_events)
 
-responder
-  next <- new
-  prev <- null
+(* [wg_packet_send_queued_handshake_initiation]
 
-when we receive date packet:
-delete(old)
-prev <- curr
-curr <- new (and new == next)
-next <- null
+   § 6.4:
+   > If a handshake response message is not subsequently received after
+   > [REKEY_TIMEOUT] seconds, a new handshake initiation message is
+   > constructed and sent.
 
+   [is_retry] is [true] only when the [retransmit_handshake] timer expires. *)
+let send_queued_handshake_initiation t ~timestamp ~now ~is_retry peer r_events =
+  let peer =
+    if is_retry then peer
+    else { peer with timers= Timers.reset_handshake_attempts peer.timers } in
+  if not (Timers.can_send_handshake ~now peer.timers) then (peer, r_events)
+  else match peer.edn with
+    | None -> (peer, `Error (msgf "Unknown endpoint") :: r_events)
+    | Some edn -> send_handshake_initiation t ~timestamp ~now peer edn r_events
+
+(* [keep_key_fresh] from [send.c], see § 6.2. *)
+let keep_key_fresh_on_send t ~timestamp ~now peer r_events =
+  match peer.curr with
+  | Some (Current curr)
+    when not (Zostera.expired ~now curr) && Zostera.rekey_on_send ~now curr ->
+    send_queued_handshake_initiation t ~timestamp ~now ~is_retry:false peer r_events
+  | Some _ | None -> (peer, r_events)
+
+(* [wg_packet_create_data_done] *)
+let create_data_done t ~timestamp ~now ~data_sent peer r_events =
+  let timers =
+    peer.timers
+    |> Timers.any_authenticated_packet_traversal ~now
+    |> Timers.any_authenticated_packet_sent in
+  let timers =
+    if data_sent then Timers.data_sent ~now ~jitter:(jitter t) timers
+    else timers in
+  let peer = { peer with timers; last_sent= Some now } in
+  keep_key_fresh_on_send t ~timestamp ~now peer r_events
+
+(* [wg_packet_send_staged_packets]
+
+   We encrypt all staged packets with the current session. If we are not able
+   to do so (no session, expired or exhausted session), packets stay into the
+   queue and we initiate a new handshake. § 6.4:
+
+   > The first time the user sends a packet over a WireGuard interface, the
+   > packet cannot immediately be sent, because no current session exists. So,
+   > after queuing the packet, WireGuard sends a handshake initiation message.
 *)
+let send_staged_packets t ~timestamp ~now peer r_events =
+  if Q.is_empty peer.queue then (peer, r_events)
+  else
+    match peer.curr, peer.edn with
+    | Some (Current session), Some edn when not (Zostera.expired ~now session) ->
+      let fn acc data =
+        let* r_pkts = acc in
+        let* pkt = Zostera.send ~now session data in
+        Ok ((pkt, not (String.is_empty data)) :: r_pkts) in
+      begin match List.fold_left fn (Ok []) (Q.to_list peer.queue) with
+      | Ok r_pkts ->
+        let data_sent = List.exists snd r_pkts in
+        let fn r_events (pkt, _) = `Send (edn, pkt) :: r_events in
+        let r_events = List.fold_left fn r_events (List.rev r_pkts) in
+        let peer = { peer with queue= Q.empty } in
+        create_data_done t ~timestamp ~now ~data_sent peer r_events
+      | Error _ ->
+        send_queued_handshake_initiation t ~timestamp ~now ~is_retry:false peer r_events
+      end
+    | _ ->
+      send_queued_handshake_initiation t ~timestamp ~now ~is_retry:false peer r_events
+
+(* [wg_packet_send_keepalive] *)
+let send_keepalive t ~timestamp ~now peer r_events =
+  let peer =
+    if Q.is_empty peer.queue
+    then { peer with queue= fst (Q.push String.empty peer.queue) }
+    else peer in
+  send_staged_packets t ~timestamp ~now peer r_events
+
+let add ?psk ?edn ?persistent_keepalive t ~timestamp ~now public =
+  let key = Zostera.octets_of_public public in
+  let me = Zostera.octets_of_public (Zostera.public t.identity) in
+  (* NOTE(dinosaure): see [netlink.c]/[set_peer], we silently ignore peers
+     that have the same public key as us. Otherwise, someone can reflect our
+     own [msg1] to us. It's silent so that the same list of peers can be used
+     everywhere. *)
+  if Eqaf.equal key me then Ok [] else
+  let* remote = Zostera.remote ?psk t.identity public in
+  let* () = guard ~err:(msgf "The given peer already exists") @@ fun () ->
+    Hashtbl.mem t.peers key = false in
+  let persistent_keepalive_interval =
+    Option.map (fun secs -> secs * 1_000_000_000) persistent_keepalive in
+  let timers = Timers.init ?persistent_keepalive_interval () in
+  let peer =
+    { remote; edn; timestamp= None; last_initiation_consumption= None
+    ; prev= None; curr= None; next= None; handshake= None
+    ; last_sent= None; last_recv= None
+    ; timers; queue= Q.empty } in
+  Hashtbl.replace t.peers key peer;
+  (* NOTE(dinosaure): see [netlink.c]/[set_peer], when a persistent keepalive
+     is set, we directly send a keepalive (which initiates a handshake). *)
+  match timers.Timers.persistent_keepalive_interval, edn with
+  | Some _, Some _ ->
+    let peer, r_events = send_keepalive t ~timestamp ~now peer [] in
+    Ok (apply t peer (List.rev r_events))
+  | _ -> Ok []
 
 (* In *)
 
+(* [keep_key_fresh] from [receive.c], see § 6.2. The time-based opportunistic
+   rekeying is restricted to the initiator and done only once per session. *)
+let keep_key_fresh_on_recv t ~timestamp ~now peer r_events =
+  if peer.timers.Timers.sent_lastminute_handshake then (peer, r_events)
+  else match peer.curr with
+    | Some (Current curr) when not (Zostera.expired ~now curr) ->
+      begin match Zostera.role curr with
+      | Zostera.Initiator when Zostera.rekey_on_recv ~now curr ->
+        let peer = { peer with timers= Timers.lastminute_handshake_sent peer.timers } in
+        send_queued_handshake_initiation t ~timestamp ~now ~is_retry:false peer r_events
+      | Zostera.Initiator | Zostera.Responder -> (peer, r_events) end
+    | Some _ | None -> (peer, r_events)
+
+(* [MESSAGE_HANDSHAKE_INITIATION] from [wg_receive_handshake_packet] and
+   [wg_packet_send_handshake_response]. *)
 let on_msg1 t ~now ~load ~from pkt =
   let* out = Zostera.msg1_of_string ?g:t.g t.bakery t.limiter ~now ~load ~peer:from pkt in
   match out with
   | `Cookie pkt -> Ok [ `Send (from, pkt) ]
   | `Msg1 msg1 ->
-    (* TODO(dinosaure): [HandshakeInitiationRate], protect us against a peer which sends too many [msg1]. *)
     let found = ref None in
     let fn public =
       let key = Zostera.octets_of_public public in
@@ -207,13 +322,26 @@ let on_msg1 t ~now ~load ~from pkt =
     let uid = fresh t in
     let* handshake, msg2 = Zostera.step1 ?g:t.g ~uid ~peer:fn msg1 t.identity in
     let* peer, ts = Option.to_result ~none:(msgf "Unaccepted initiator") !found in
+    (* NOTE(dinosaure): see [wg_noise_handshake_consume_initiation], we accept
+       at most [INITIATIONS_PER_SECOND] [msg1] per peer. As the replay
+       protection (see [Zostera.step1]), it's done after the decryption of the
+       timestamp, so only an authenticated initiator can trigger it. *)
+    let* () = guard ~err:(msgf "Handshake initiation flood") @@ fun () ->
+      match peer.last_initiation_consumption with
+      | Some at -> now - at >= 1_000_000_000 / _INITIATIONS_PER_SECOND
+      | None -> true in
     let* session = session_of_responder ~now handshake in
-    let peer = { peer with new_handshake_at= None } in
     let pkt = Zostera.msg2_to_string ~now handshake msg2 in
-    let peer = { peer with timestamp= Some ts; edn= Some from
-                         ; last_recv= Some now; last_sent= Some now; last_handshake_sent= Some now
-                         ; keepalive_at= None
-                         ; zero_keys_at= Some (now + 3 * _REJECT_AFTER_TIME) } in
+    let timers =
+      peer.timers
+      (* [wg_packet_send_handshake_response] *)
+      |> Timers.session_derived ~now
+      |> Timers.any_authenticated_packet_traversal ~now
+      |> Timers.any_authenticated_packet_sent
+      |> Timers.handshake_sent ~now
+      (* end of [wg_receive_handshake_packet] *)
+      |> Timers.any_authenticated_packet_received
+      |> Timers.any_authenticated_packet_traversal ~now in
     (* NOTE(dinosaure): we forget [prev] and [next] sessions. *)
     let forget = [] in
     let forget = cons_if_some (uid_of_session `Prev peer) forget in
@@ -224,52 +352,32 @@ let on_msg1 t ~now ~load ~from pkt =
 
        § 6.3:
        > Every time a new secure session is created, for the responder, the
-       > [next] slot is used _interstitially_ until the handshake is confirmed. *)
-    let peer = { peer with prev= None; next= Some session; last_handshake= Some now } in
+       > [next] slot is used _interstitially_ until the handshake is confirmed.
+
+       NOTE(dinosaure): [edn= Some from], see [wg_receive_handshake_packet] and
+       [wg_socket_set_peer_endpoint_from_skb] in the
+       [MESSAGE_HANDSHAKE_INITIATION] case. *)
+    let peer =
+      { peer with timestamp= Some ts; edn= Some from
+                ; last_initiation_consumption= Some now
+                ; last_recv= Some now; last_sent= Some now
+                ; prev= None; next= Some session; timers } in
     (* NOTE(dinosaure): do [forget] first, [`Register] then and [`Send]. *)
     let r_events = (`Send (from, pkt) :: `Register uid :: forget) in
     Ok (apply t peer (List.rev r_events))
 
-let send ~now peer (Current session) data r_events =
-  let* edn = Option.to_result ~none:(msgf "Unknown endpoint") peer.edn in
-  let* pkt = Zostera.send ~now session data in
-  let peer =
-    if not (String.is_empty data) && Option.is_none peer.new_handshake_at
-    then { peer with new_handshake_at= Some (now + _KEEPALIVE_TIMEOUT + _REKEY_TIMEOUT) }
-    else peer in
-  Ok ({ peer with last_sent= Some now; keepalive_at= None }, `Send (edn, pkt) :: r_events)
-
-let flush ~now ~keepalive peer r_events =
-  match peer.curr with
-  | None -> (peer, r_events)
-  | Some curr ->
-    match Q.to_list peer.queue with
-    | [] when keepalive ->
-      begin match send ~now peer curr "" r_events with
-      | Ok value -> value
-      | Error err -> peer, `Error err :: r_events end
-    | [] -> (peer, r_events)
-    | sstr ->
-      let rec go peer r_events = function
-        | [] -> peer, r_events
-        | data :: rem as sstr ->
-          match send ~now peer curr data r_events with
-          | Ok (peer, r_events) -> go peer r_events rem
-          | Error err ->
-            (* NOTE(dinosaure): it's safe because [sstr] comes from [Q.to_list]. *)
-            { peer with queue= Q.unsafe_of_list sstr }, `Error err :: r_events in
-      go { peer with queue= Q.empty } r_events sstr
-
-let on_msg2 t ~now ~load ~from uid peer pkt =
+(* [MESSAGE_HANDSHAKE_RESPONSE] from [wg_receive_handshake_packet]. *)
+let on_msg2 t ~timestamp ~now ~load ~from uid peer pkt =
   let* out = Zostera.msg2_of_string ?g:t.g t.bakery t.limiter ~now ~load ~peer:from pkt in
   match out, peer.handshake with
   | `Cookie pkt, _ -> Ok (peer, [ `Send (from, pkt) ])
   | `Msg2 _, None -> error_msgf "Unexpected handshake response"
-  | `Msg2 msg2, Some { state; _ } ->
+  | `Msg2 msg2, Some state ->
+    (* NOTE(dinosaure): due to [Some state], we prove that we are the initiator.
+       Only the initiator can have such value. *)
     let* () = guard ~err:(msgf "Unexpected receiver") @@ fun () ->
       Zostera.uid_of_initiator state = uid in
     let* session = Zostera.step2 ~now msg2 t.identity state in
-    let peer = { peer with edn= Some from; last_recv= Some now; new_handshake_at= None } in
     let forget = [] in
     let forget = match peer.next with
       | Some _ ->
@@ -281,14 +389,34 @@ let on_msg2 t ~now ~load ~from uid peer pkt =
     let forget = List.map (fun uid -> `Forget uid) forget in
     let prev = match peer.next, peer.curr with
       | Some next, _ -> Some (Unconfirmed next)
+        (* NOTE(dinosaure): see wireguard-linux, [add_newkeypairs]:
+
+           If there already was a next keypair pending, we demote it to be the
+           previous keypair, and free the existing current. Note that this means
+           KCI can result in this transition. It would perhaps be more sound to
+           always just get rid of the unused next keypair instead of putting it
+           in the previous slot, but this might be a bit less robust. Something
+           to think about for the future. *)
       | None, Some (Current curr) -> Some (Confirmed curr)
       | None, None -> None in
-    let peer = { peer with prev; curr= Some (Current session); next= None
-                         ; handshake= None; last_handshake= Some now
-                         ; zero_keys_at= Some (now + 3 * _REJECT_AFTER_TIME) } in
-    let peer, r_events = flush ~now ~keepalive:true peer forget in
-    Ok (peer, r_events)
+    let timers =
+      peer.timers
+      |> Timers.session_derived ~now
+      |> Timers.handshake_complete ~timestamp
+      |> Timers.any_authenticated_packet_received
+      |> Timers.any_authenticated_packet_traversal ~now in
+    (* NOTE(dinosaure): for [edn= Some from], see [wg_receive_handshake_packet]
+       and [wg_socket_set_peer_endpoint_from_skb] in the
+       [MESSAGE_HANDSHAKE_RESPONSE] case. *)
+    let peer =
+      { peer with edn= Some from; last_recv= Some now
+                ; prev; curr= Some (Current session); next= None
+                ; handshake= None; timers } in
+    (* NOTE(dinosaure): it sends staged packets or, if there are none, a
+       keepalive to give an immediate confirmation of the session. *)
+    Ok (send_keepalive t ~timestamp ~now peer forget)
 
+(* [MESSAGE_HANDSHAKE_COOKIE], no timers are involved. *)
 let on_cookie ~now uid peer pkt =
   let* () = guard ~err:(msgf "Unexpected cookie") @@ fun () ->
     uid_of_session `Hshk peer = Some uid
@@ -299,235 +427,128 @@ let on_cookie ~now uid peer pkt =
 (* NOTE(dinosaure): here, we rotate sessions:
    - the [t.curr] session becomes [t.prev]
    - the given session is new new [t.curr] session
-   - [t.next] becomes [None] in any cases
-
-   TODO(dinosaure): it seems that when we have a next, it becomes the previous.*)
-let rotate ~now peer session =
+   - [t.next] becomes [None] in any cases *)
+let rotate peer session =
   let forget = cons_if_some (uid_of_session `Prev peer) [] in
   let forget = List.map (fun uid -> `Forget uid) forget in
   let prev = match peer.curr with
     | Some (Current curr) -> Some (Confirmed curr)
     | None -> None in
-  let peer = { peer with prev; curr= Some (Current session); next= None } in
-  flush ~now ~keepalive:false peer forget
+  ({ peer with prev; curr= Some (Current session); next= None }, forget)
 
-(* See [timers.go]/[JitterMaxMs]. *)
-let jitter t =
-  let buf = Mirage_crypto_rng.generate ?g:t.g 2 in
-  (String.get_uint16_le buf 0 mod 334) * 1_000_000 (* [0, 333] ms *)
-
-let initiation t ~timestamp ~now ~first peer edn r_events =
-  let uid = fresh t in
-  let* state, msg1 = Zostera.step0 ?g:t.g ~uid ~timestamp t.identity peer.remote in
-  let pkt = Zostera.msg1_to_string ~now state msg1 in
-  (* NOTE(dinosaure): WireGuard mentions an exponential backoff instead of
-     [_REKEY_TIMEOUT]. *)
-  let retry_at = now + _REKEY_TIMEOUT + jitter t in
-  let handshake = Some { state; first; retry_at } in
-  let peer =
-    { peer with handshake
-         ; last_sent= Some now; last_handshake_sent= Some now
-         ; keepalive_at= None } in
-  Ok (peer, `Send (edn, pkt) :: `Register uid :: r_events)
-
-let recently_sent_handshake peer now =
-  match peer.last_handshake_sent with
-  | Some sent -> now - sent < _REKEY_TIMEOUT
-  | None -> false
-
-let initiate t ~timestamp ~now peer r_events =
-  match peer.handshake, peer.edn with
-  | Some _, _ -> Ok (peer, r_events) (* NOTE(dinosaurte): already in-handshake *)
-  | None, _ when recently_sent_handshake peer now -> Ok (peer, r_events) (* NOTE(dinosaure): already sent [msg1]/[msg2] the last 5s. *)
-  | None, None -> error_msgf "Unknown endpoint"
-  | None, Some edn ->
-    (* "if a handshake response message is not subsequently received after
-        [_REKEY_TIMEOUT] seconds, a new handshake initiation message is
-        constructed and sent." (§ 6.4). See also [retransmit]. *)
-    initiation t ~timestamp ~now ~first:now peer edn r_events
-
-let maybe_rekey_on_recv t ~timestamp ~now peer r_events =
-  match peer.curr with
-  | None -> peer, r_events
-  | Some (Current curr) ->
-    match Zostera.role curr with
-    | Zostera.Initiator when Zostera.rekey_on_recv ~now curr ->
-      begin match initiate t ~timestamp ~now peer r_events with
-      | Ok value -> value
-      | Error err -> peer, `Error err :: r_events end
-    | Zostera.Initiator | Zostera.Responder -> peer, r_events
-
+(* [wg_packet_consume_data_done] *)
 let on_data t ~timestamp ~now ~from uid peer pkt =
-  let* peer, out, r_events = match peer with
+  let* peer, out, confirmed, r_events = match peer with
     | { next= Some next; _ } when Zostera.uid_of_local next = uid ->
       let* session, out = Zostera.confirm ~now next pkt in
-      let peer = { peer with edn= Some from; last_recv= Some now; new_handshake_at= None } in
-      let peer, r_events = rotate ~now peer session in
-      Ok (peer, out, r_events)
+      let peer, r_events = rotate peer session in
+      Ok (peer, out, true, r_events)
     | { curr= Some (Current curr); _ } when Zostera.uid_of_local curr = uid ->
       let* out = Zostera.recv ~now curr pkt in
-      let peer = { peer with edn= Some from; last_recv= Some now; new_handshake_at= None } in
-      Ok (peer, out, [])
+      Ok (peer, out, false, [])
     | { prev= Some (Confirmed prev); _ } when Zostera.uid_of_local prev = uid ->
       let* out = Zostera.recv ~now prev pkt in
-      let peer = { peer with edn= Some from; last_recv= Some now; new_handshake_at= None } in
-      Ok (peer, out, [])
+      Ok (peer, out, false, [])
     | { prev= Some (Unconfirmed prev); _ } when Zostera.uid_of_local prev = uid ->
       let* session, out = Zostera.confirm ~now prev pkt in
-      let peer = { peer with edn= Some from; last_recv= Some now; new_handshake_at= None } in
-      Ok ({ peer with prev= Some (Confirmed session) }, out, [])
+      Ok ({ peer with prev= Some (Confirmed session) }, out, false, [])
     | _ -> error_msgf "Unexpected receiver" in
-  let peer, r_events = match out with
-    | `Keepalive -> peer, r_events
+  (* NOTE(dinosaure): only now, after decryption and validation of the
+     counter, we can update the endpoint. *)
+  let timers = peer.timers in
+  let timers =
+    if confirmed then Timers.handshake_complete ~timestamp timers
+    else timers in
+  let timers =
+    timers
+    |> Timers.any_authenticated_packet_received
+    |> Timers.any_authenticated_packet_traversal ~now in
+  let timers, r_events = match out with
+    | `Keepalive -> (timers, r_events)
     | `Data data ->
-      let peer =
-        if Option.is_none peer.keepalive_at
-        then { peer with keepalive_at= Some (now + _KEEPALIVE_TIMEOUT) }
-        else peer in
-      let r_events = `Deliver (Zostera.public_of_remote peer.remote, data) :: r_events in
-      peer, r_events in
-  let peer, r_events = maybe_rekey_on_recv t ~timestamp ~now peer r_events in
-  Ok (peer, r_events)
+      let public = Zostera.public_of_remote peer.remote in
+      (Timers.data_received ~now timers, `Deliver (public, data) :: r_events) in
+  let peer = { peer with edn= Some from; last_recv= Some now; timers } in
+  let peer, r_events =
+    if confirmed then send_staged_packets t ~timestamp ~now peer r_events
+    else (peer, r_events) in
+  Ok (keep_key_fresh_on_recv t ~timestamp ~now peer r_events)
 
-let packet t ~timestamp ~now ~load ~from pkt =
+let packet t ~timestamp ~now ?(pending = 0) ~from pkt =
   let* k =
     let* () = guard ~err:(msgf "Truncated WireGuard packet") @@ fun () ->
       String.length pkt >= 4 in
     Ok (String.get_int32_le pkt 0) in
+  (* NOTE(dinosaure): as Linux, the load is only computed for [msg1] and
+     [msg2] (cookies are consumed before). *)
+  let load () = under_load t ~now ~pending in
   match k with
-  | 1l -> on_msg1 t ~now ~load ~from pkt
+  | 1l -> on_msg1 t ~now ~load:(load ()) ~from pkt
   | 2l | 3l | 4l ->
     let* uid = Uid.receiver pkt in
     let* key = Option.to_result ~none:(msgf "Unknown receiver") (Hashtbl.find_opt t.index uid) in
     let* peer = Option.to_result ~none:(msgf "Orphan unique ID") (Hashtbl.find_opt t.peers key) in
     let* peer, r_events = match k with
-      | 2l -> on_msg2 t ~now ~load ~from uid peer pkt
+      | 2l -> on_msg2 t ~timestamp ~now ~load:(load ()) ~from uid peer pkt
       | 3l -> on_cookie ~now uid peer pkt
       | _ -> on_data t ~timestamp ~now ~from uid peer pkt in
     Ok (apply t peer (List.rev r_events))
   | _ -> error_msgf "Unknown packet type"
 
-(* Out *)
-
-let maybe_rekey_on_send t ~timestamp ~now peer r_events =
-  match peer.curr with
-  | Some (Current curr) when Zostera.rekey_on_send ~now curr ->
-    begin match initiate t ~timestamp ~now peer r_events with
-    | Ok value -> value
-    | Error err -> peer, `Error err :: r_events end
-  | Some _ | None -> peer, r_events
-
-(* About [enqueue] and [write], § 6.4:
-
-   > The first time the user sends a packet over a WireGuard interface, the
-   > packet cannot immediately be sent, because no current session exists. So,
-   > after queuing the packet, WireGuard sends a handshake initiation message.
-*)
-let enqueue t ~timestamp ~now peer data r_events =
-  let queue, dropped = Q.push data peer.queue in
-  let peer = { peer with queue } in
-  let r_events = match dropped with
-    | Some x -> `Drop (Zostera.public_of_remote peer.remote, x) :: r_events
-    | None -> r_events in
-  match initiate t ~timestamp ~now peer r_events with
-  | Ok value -> value
-  | Error err -> peer, `Error err :: r_events
-
+(* [wg_xmit] *)
 let write t ~timestamp ~now public = function
   | "" -> Ok []
   | data ->
     let key = Zostera.octets_of_public public in
+    (* NOTE(dinosaure): a packet **must** have an endpoint. *)
     let* peer = Option.to_result ~none:(msgf "Unknown peer") (Hashtbl.find_opt t.peers key) in
-    let peer, r_events = match peer.curr with
-      | Some (Current session as curr) when not (Zostera.expired ~now session) ->
-        (* NOTE(dinosaure): we can have an error due to:
-           - [peer.edn] is not set
-           - the session is expired (which should not occur), see [expired]
-           - the session is exhausted (which should not occur), see [expired] *)
-        begin match send ~now peer curr data [] with
-        | Ok (peer, r_events) -> maybe_rekey_on_send t ~timestamp ~now peer r_events
-        | Error _ -> enqueue t ~timestamp ~now peer data [] end
-      | Some _ | None -> enqueue t ~timestamp ~now peer data [] in
+    (* NOTE(dinosaure): see [send_staged_packets], we send packets only if a
+       current session is available. In the case of the responder, such session
+       can exist only if we [Zostera.confirm]. If it's not the case, we just
+       fill our queue until the initiator send to use a keep-alive or a data
+       packet to confirm our session. *)
+    let queue, dropped = Q.push data peer.queue in
+    let r_events = match dropped with
+      | Some x when not (String.is_empty x) ->
+        [ `Drop (Zostera.public_of_remote peer.remote, x) ]
+      | Some _ | None -> [] in
+    let peer, r_events = send_staged_packets t ~timestamp ~now { peer with queue } r_events in
     Ok (apply t peer (List.rev r_events))
 
 (* Tick *)
 
-let drop peer r_events =
+(* [wg_packet_purge_staged_packets] *)
+let purge_staged_packets peer r_events =
   let public = Zostera.public_of_remote peer.remote in
-  let fn r_events data = `Drop (public, data) :: r_events in
+  let fn r_events = function
+    | "" -> r_events
+    | data -> `Drop (public, data) :: r_events in
   let r_events = List.fold_left fn r_events (Q.to_list peer.queue) in
   ({ peer with queue= Q.empty }, r_events)
 
-(* § 6.3:
-   > If no new secure session is created after [_REJECT_AFTER_TIME × 3]
+(* [wg_queued_expired_zero_key_material], § 6.3:
+
+   > If no new secure session is created after [REJECT_AFTER_TIME × 3]
    > seconds, the current secure session, the previous secure session, and
    > potentially the next secure session are discarded and zeroed out, in
    > addition to any possible partially-completed handshake states and
    > ephemeral keys. *)
-let zero_keys peer r_events =
-  let forget = List.map (fun uid -> `Forget uid) (uids peer) in
-  let peer, r_events = drop peer (List.rev_append forget r_events) in
-  let peer = { peer with prev= None; curr= None; next= None; handshake= None
-                    ; keepalive_at= None; new_handshake_at= None; zero_keys_at= None } in
-  (peer, r_events)
-
-let give_up peer r_events =
-  let r_events = cons_if_some (Option.map forget (uid_of_session `Hshk peer)) r_events in
-  let peer, r_events = drop peer r_events in
-  { peer with handshake= None; keepalive_at= None }, r_events
-
-let retransmit t ~timestamp ~now peer hshk r_events =
-  let r_events = `Forget (Zostera.uid_of_initiator hshk.state) :: r_events in
-  let peer = { peer with handshake= None } in
-  match peer.edn with
-  | None -> peer, `Error (msgf "Unknown endpoint") :: r_events
-  | Some edn ->
-    match initiation t ~timestamp ~now ~first:hshk.first peer edn r_events with
-    | Ok value -> value
-    | Error err -> peer, `Error err :: r_events
-
-let passive_keepalive ~now peer r_events =
-  let peer = { peer with keepalive_at= None } in
-  match peer.curr with
-  | Some (Current session as curr) when not (Zostera.expired ~now session) ->
-    begin match send ~now peer curr "" r_events with
-    | Ok value -> value
-    | Error err -> peer, `Error err :: r_events end
-  | _ -> peer, r_events
-
-let due now = function Some at -> now >= at | None -> false
+let zero_key_material peer r_events =
+  let r_events = List.rev_append (List.map forget (uids peer)) r_events in
+  ({ peer with prev= None; curr= None; next= None; handshake= None }, r_events)
 
 let tick t ~timestamp ~now peer =
-  let r_events = [] in
-  if due now peer.zero_keys_at then zero_keys peer r_events
-  else
-    let peer, r_events = match peer.handshake with
-      | Some hshk when now >= hshk.retry_at ->
-        if now - hshk.first >= _REKEY_ATTEMPT_TIME
-        then give_up peer r_events
-        else retransmit t ~timestamp ~now peer hshk r_events
-      | _ -> peer, r_events in
-    (* § 6.5:
-       > If a peer has received has received a validly-authenticated transport
-       > data message, but does not have any packets itself to send back for
-       > [_KEEPALIVE_TIMEOUT] seconds, it sends a _keepalive message_.
-
-       [keepalive_at] is armed only when we receive data (see [on_data]).
-       It sets to [None] on:
-       - [on_msg1] after an authenticated [msg1] (responder)
-       - on [send] (if we have no failures) (initiator & responder)
-       - on [initiation] (if we have no failures) (initiator) *)
-    let peer, r_events =
-      if due now peer.keepalive_at
-      then passive_keepalive ~now peer r_events
-      else peer, r_events in
-    if due now peer.new_handshake_at
-    then
-      let peer = { peer with new_handshake_at= None } in
-      match initiate t ~timestamp ~now peer r_events with
-      | Ok value -> value
-      | Error err -> peer, `Error err :: r_events
-    else peer, r_events
+  let expiries, timers = Timers.expired ~now peer.timers in
+  let fn (peer, r_events) = function
+    | `Retransmit_handshake ->
+      send_queued_handshake_initiation t ~timestamp ~now ~is_retry:true peer r_events
+    | `Give_up -> purge_staged_packets peer r_events
+    | `Send_keepalive | `Persistent_keepalive ->
+      send_keepalive t ~timestamp ~now peer r_events
+    | `New_handshake ->
+      send_queued_handshake_initiation t ~timestamp ~now ~is_retry:false peer r_events
+    | `Zero_key_material -> zero_key_material peer r_events in
+  List.fold_left fn ({ peer with timers }, []) expiries
 
 let tick t ~timestamp ~now =
   let peers = Hashtbl.fold (fun _ peer acc -> peer :: acc) t.peers [] in
@@ -536,16 +557,8 @@ let tick t ~timestamp ~now =
     apply t peer (List.rev r_events) in
   List.concat_map fn peers
 
-let deadlines peer =
-  List.filter_map Fun.id
-    [ Option.map (fun hshk -> hshk.retry_at) peer.handshake
-    ; peer.keepalive_at
-    ; peer.new_handshake_at
-    ; peer.zero_keys_at ]
-
 let deadline t =
-  let fn1 acc at = match acc with
-    | None -> Some at
-    | Some best -> Some (Int.min best at) in
-  let fn0 _ peer acc = List.fold_left fn1 acc (deadlines peer) in
-  Hashtbl.fold fn0 t.peers None
+  let fn _ peer acc = match acc, Timers.deadline peer.timers with
+    | None, at | at, None -> at
+    | Some a, Some b -> Some (Int.min a b) in
+  Hashtbl.fold fn t.peers None

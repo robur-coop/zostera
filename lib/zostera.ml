@@ -1,5 +1,3 @@
-[@@@warning "-37"]
-
 let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
 let msgf fmt = Fmt.kstr (fun msg -> `Msg msg) fmt
 let guard ~err fn = if fn () then Ok () else Error err
@@ -587,6 +585,11 @@ let recv ~now { local; keys; birth; window; _ } pkt =
   let* msg = match decrypt_data ~key:keys.recv ~counter txt with
     | Some msg -> Ok msg
     | None -> error_msgf "AEAD authentication failed" in
+  (* NOTE(dinosaure): when we receive a packet, we decrypt and only then we
+     validate the counter. On wireguard-linux, the execution path is a bit more
+     complre due to workqueues but a process decrypt packets and retransmit them
+     into [peer->rx_queue]. Then, on [wg_packet_rx_poll], that's the only place
+     where we validate the counter. *)
   let* () = guard ~err:(msgf "Replayed packet") @@ fun () ->
     Window.validate window counter in
   if String.length msg = 0 then Ok `Keepalive else Ok (`Data msg)
