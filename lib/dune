@@ -2,7 +2,7 @@
  (name zostera)
  (modules zostera uid limiter addr window)
  (public_name zostera)
- (libraries ipaddr digestif.c ohex mirage-crypto-rng.unix fmt mirage-crypto-ec kdf.hkdf))
+ (libraries ipaddr digestif.c ohex mirage-crypto-rng fmt mirage-crypto-ec kdf.hkdf))
 
 (library
  (name bruit)
