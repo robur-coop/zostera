@@ -66,6 +66,18 @@ let write ?lose ~now nodes src dst data =
   | Ok actions -> run ?lose ~now nodes src actions
   | Error err -> Test.failwithf "%a" Zostera.pp_error err
 
+let receive ~now ?pending ~from dst pkt =
+  match Bruit.packet dst.bruit ~timestamp:(timestamp now) ~now ?pending ~from:from.addr pkt with
+  | Ok actions ->
+    let fn = function `Send (_, _, pkt) -> Some pkt | _ -> None in
+    List.filter_map fn actions
+  | Error err -> Test.failwithf "%a" Zostera.pp_error err
+
+let msg1 ~now a b =
+  match Bruit.write a.bruit ~timestamp:(timestamp now) ~now b.public "hello" with
+  | Ok [ `Send (_, _, pkt) ] when kind pkt = _MSG1 -> pkt
+  | _ -> Test.failwithf "We expect a msg1 packet"
+
 let tick ?lose ~now nodes src =
   run ?lose ~now nodes src (Bruit.tick src.bruit ~timestamp:(timestamp now) ~now)
 
@@ -181,11 +193,31 @@ let test006 =
     Test.check (trace.sent = [ a.addr, _DATA, _KEEPALIVE_LEN ])
   done
 
+let test007 =
+  let descr = {text|under load|text} in
+  Test.test ~title:"test007" ~descr @@ fun () ->
+  let now = 1_000 * _1s in
+  let a, b, _ = pair ~now () in
+  let pkt = msg1 ~now a b in
+  let cookie = match receive ~now ~pending:512 ~from:a b pkt with
+    | [ cookie ] when kind cookie = _COOKIE -> cookie
+    | _ -> Test.failwithf "We expect a cookie packet" in
+  Test.check (receive ~now ~from:b a cookie = []);
+  let now = Option.get (Bruit.deadline a.bruit) in
+  let pkt = match Bruit.tick a.bruit ~timestamp:(timestamp now) ~now with
+    | [ `Send (_, _, pkt) ] when kind pkt = _MSG1 -> pkt
+    | _ -> Test.failwithf "We expect a retransmitted msg1 packet" in
+  let fn pkt = `Send (a.addr, 0, pkt) in
+  let actions = List.map fn (receive ~now ~pending:512 ~from:a b pkt) in
+  let trace = run ~now [ a; b ] b actions in
+  Test.check (count ~src:b ~kind:_MSG2 trace = 1); (* handshake done! *)
+  Test.check (trace.delivered = [ (b.addr, padded "hello" )]) (* see our first [msg1] *)
+
 let ( / ) = Filename.concat
 
 let () =
   Mirage_crypto_rng_unix.use_default ();
-  let tests = [ test001; test002; test003; test004; test005; test006 ] in
+  let tests = [ test001; test002; test003; test004; test005; test006; test007 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);
