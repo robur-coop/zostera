@@ -36,7 +36,7 @@ let padded str =
   let len = String.length str in
   str ^ String.make ((16 - (len mod 16)) land 15) '\000'
 
-let _MSG1 = 1 and _MSG2 = 2 and _DATA = 4
+let _MSG1 = 1 and _MSG2 = 2 and _DATA = 4 and _COOKIE = 3
 let _KEEPALIVE_LEN = 32
 
 let run ?(lose = fun _src _pkt -> false) ~now nodes src actions =
@@ -121,11 +121,35 @@ let test003 =
   (* our initiator retry an handshake after _KEEPALIVE_TIMEOUT + _REKEY_TIMEOUT + jitter (<= 333ms) *)
   Test.check (count ~src:a ~kind:_MSG1 trace = 1)
 
+let test004 =
+  let descr = {text|one handshake and black hole|text} in
+  Test.test ~title:"test004" ~descr @@ fun () ->
+  let now = ref (1_000 * _1s) in
+  let a, b, _ = pair ~now:!now () in
+  (* handshake is done! *)
+  let lose _ _ = true in
+  let trace = write ~lose ~now:!now [ a; b ] a b "and we loose everything!" in
+  let msg1 = ref (count ~src:a ~kind:_MSG1 trace) in
+  Test.check (!msg1 = 1);
+  let dropped = ref [] in
+  while !dropped = [] do
+    match Bruit.deadline a.bruit with
+    | None -> Test.failwithf "We must have, at least, one deadline"
+    | Some at ->
+      now := at; (* we advance *)
+      let trace = tick ~lose ~now:!now [ a; b ] a in
+      msg1 := !msg1 + count ~src:a ~kind:_MSG1 trace;
+      dropped := trace.dropped
+  done;
+  Test.check (!msg1 = 20); (* all of our attempts: 18 (_MAX_TIMER_HANDSHAKES + 2) *)
+  Test.check (!dropped = [ "and we loose everything!" ]);
+  Test.check (Bruit.deadline a.bruit = Some (!now + 540 (* _REJECT_AFTER_TIME * 3 *) * _1s))
+
 let ( / ) = Filename.concat
 
 let () =
   Mirage_crypto_rng_unix.use_default ();
-  let tests = [ test001; test002; test003 ] in
+  let tests = [ test001; test002; test003; test004 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);
