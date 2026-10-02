@@ -66,6 +66,9 @@ let write ?lose ~now nodes src dst data =
   | Ok actions -> run ?lose ~now nodes src actions
   | Error err -> Test.failwithf "%a" Zostera.pp_error err
 
+let tick ?lose ~now nodes src =
+  run ?lose ~now nodes src (Bruit.tick src.bruit ~timestamp:(timestamp now) ~now)
+
 let count ~src ~kind:k trace =
   List.length (List.filter (fun (src', k', _) -> src' = src.addr && k' = k) trace.sent)
 
@@ -86,11 +89,27 @@ let test001 =
   let trace = write ~now [ a; b ] b a "world" in
   Test.check (trace.delivered = [ (a.addr, padded "world") ])
 
+let test002 =
+  let descr = {text|passive keepalive|text} in
+  Test.test ~title:"test002" ~descr @@ fun () ->
+  let now = 1_000 * _1s in
+  let a, b, _ = pair ~now () in
+  handshake ~now a b;
+  (* [b] received data but we don't send back. We do nothing for 9s. *)
+  let trace = tick ~now:(now + 9 * _1s) [ a; b ] b in
+  Test.check (trace.sent = []);
+  (* after 10s, we should send a keepalive. *)
+  let trace = tick ~now:(now + 10 * _1s) [ a; b ] b in
+  Test.check (trace.sent = [ (b.addr, _DATA, _KEEPALIVE_LEN) ]);
+  Test.check (trace.delivered = []); (* Silence is a virtue. *)
+  let trace = tick ~now:(now + 20 * _1s) [ a; b ] a in
+  Test.check (trace.sent = []) (* Again, silence is a virtue! *)
+
 let ( / ) = Filename.concat
 
 let () =
   Mirage_crypto_rng_unix.use_default ();
-  let tests = [ test001 ] in
+  let tests = [ test001; test002 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);
