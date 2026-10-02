@@ -38,9 +38,9 @@ let padded str =
 
 let _MSG1 = 1 and _MSG2 = 2 and _DATA = 4 and _COOKIE = 3
 let _KEEPALIVE_LEN = 32
+let kind pkt = String.get_uint8 pkt 0
 
 let run ?(lose = fun _src _pkt -> false) ~now nodes src actions =
-  let kind pkt = String.get_uint8 pkt 0 in
   let sent = ref [] and delivered = ref [] and dropped = ref [] in
   let rec go src actions =
     let fn = function
@@ -145,11 +145,30 @@ let test004 =
   Test.check (!dropped = [ "and we loose everything!" ]);
   Test.check (Bruit.deadline a.bruit = Some (!now + 540 (* _REJECT_AFTER_TIME * 3 *) * _1s))
 
+let test005 =
+  let descr = {text|last minute handshake|text} in
+  Test.test ~title:"test005" ~descr @@ fun () ->
+  let now = 1_000 * _1s in
+  let a, b, _ = pair ~now () in
+  handshake ~now a b;
+  let lose src pkt = src.addr = a.addr && kind pkt = _MSG1 in
+  let trace = write ~lose ~now:(now + 160 * _1s) [ a; b ] b a "before" in
+  Test.check (count ~src:a ~kind:_MSG1 trace = 0);
+  let trace = write ~lose ~now:(now + 166 * _1s) [ a; b ] b a "after" in
+  Test.check (count ~src:a ~kind:_MSG1 trace = 1); (* our last minute handshake *)
+  let trace = write ~lose ~now:(now + 172 * _1s) [ a; b ] b a "not too late" in
+  Test.check (trace.delivered = [ (a.addr, padded "not too late") ]);
+  Test.check (count ~src:a ~kind:_MSG1 trace = 0);
+  let trace = write ~lose ~now:(now + 190 * _1s) [ a; b ] a b "too late" in
+  Test.check (count ~src:a ~kind:_MSG1 trace = 1);
+  Test.check (count ~src:a ~kind:_DATA trace = 0);
+  Test.check (trace.delivered = [])
+
 let ( / ) = Filename.concat
 
 let () =
   Mirage_crypto_rng_unix.use_default ();
-  let tests = [ test001; test002; test003; test004 ] in
+  let tests = [ test001; test002; test003; test004; test005 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);
