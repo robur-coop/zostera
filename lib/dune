@@ -9,3 +9,9 @@
  (modules bruit timers ecn)
  (public_name zostera.bruit)
  (libraries fmt zostera))
+
+(library
+ (name nat)
+ (modules nat)
+ (public_name zostera.nat)
+ (libraries utcp fmt ipaddr slice.bstr))
