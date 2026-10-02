@@ -25,6 +25,7 @@ let _UDP = 17
 let _UDP_TIMEOUT = 120 * _1s
 let _ICMP = 1
 let _ICMP_TIMEOUT = 30 * _1s
+let _FRAG_TIMEOUT = 30 * _1s
 
 let timeout_of_proto proto =
   if proto = _TCP then _TCP_TIMEOUT
@@ -36,6 +37,18 @@ let err_ttl_exceeded = Error `TTL_exceeded
 let err_all_ports_used = `All_ports_used
 let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
 let ( let* ) = Result.bind
+
+type error =
+  [ `Invalid_IPv4_packet
+  | `TTL_exceeded
+  | `All_ports_used
+  | `Msg of string ]
+
+let pp_error ppf = function
+  | `Invalid_IPv4_packet -> Fmt.string ppf "Invalid IPv4 packet"
+  | `TTL_exceeded -> Fmt.string ppf "TTL exceeded"
+  | `All_ports_used -> Fmt.string ppf "All ports used"
+  | `Msg msg -> Fmt.string ppf msg
 
 type ipv4_hdr =
   { ihl : int
@@ -109,13 +122,25 @@ type key = { kproto : int; inside : Ipaddr.V4.t; iport : int; remote : Ipaddr.V4
 type rkey = { rproto : int; eport : int; from : Ipaddr.V4.t; fport : int }
 type fkey = { fproto : int; fsrc : Ipaddr.V4.t; fuid : int }
 type entry = { key : key; rkey : rkey; mutable seen : int; mutable timeout : int }
+type frag = { birth : int; mutable inside : Ipaddr.V4.t option; mutable pending : string list; mutable size : int }
 
 type t =
   { public : Ipaddr.V4.t
   ; outs : (key, entry) Hashtbl.t (* LAN -> tunnel *)
   ; ins : (rkey, entry) Hashtbl.t (* tunnel -> LAN *)
+  ; frags : (fkey, frag) Hashtbl.t
   ; used : (int, int) Hashtbl.t (* (proto, eport) -> refcount *)
   ; mutable next : int }
+
+let create public =
+  { public
+  ; outs= Hashtbl.create 0x100
+  ; ins= Hashtbl.create 0x100
+  ; used= Hashtbl.create 0x100
+  ; frags= Hashtbl.create 0x10
+  ; next= _MIN_PORT }
+
+let size t = Hashtbl.length t.outs
 
 (* NOTE(dinosaure): one [rkey] has only one association *)
 
@@ -134,7 +159,9 @@ let clean_up t ~now =
     then entry :: acc
     else acc in
   let expired = Hashtbl.fold fn t.outs [] in
-  List.iter (clean_up t) expired
+  List.iter (clean_up t) expired;
+  let fn _ frag = if now - frag.birth > _FRAG_TIMEOUT then None else Some frag in
+  Hashtbl.filter_map_inplace fn t.frags
 
 let allocate t ~now key =
   let free eport =
@@ -384,6 +411,59 @@ let translate t ~now buf hdr =
       Ok entry.key.inside end
   else error_msgf "Unsupported protocol %d" hdr.proto
 
+let rewrite_dst inside buf =
+  if decr buf then begin
+    setipv4 buf 16 inside ~csums:[ (10, false) ];
+    Some (inside, buf)
+  end else None
+
+let frag t ~now buf hdr =
+  let fproto = hdr.proto
+  and fsrc = hdr.src
+  and fuid = hdr.uid in
+  let fkey = { fproto; fsrc; fuid } in
+  match translate t ~now buf hdr with
+  | Error _ as err -> Hashtbl.remove t.frags fkey; err
+  | Ok inside ->
+    let pending = match Hashtbl.find_opt t.frags fkey with
+      | Some frag -> List.rev frag.pending
+      | None -> [] in
+    let frag = { birth= now; inside= Some inside; pending= []; size= 0 } in
+    Hashtbl.replace t.frags fkey frag;
+    (* NOTE(dinosaure): ok, it's COMPLETELY unsafe but trust me here. *)
+    let pending = List.map Bytes.unsafe_of_string pending in
+    let fn = rewrite_dst inside in
+    Ok ((inside, buf) :: List.filter_map fn pending)
+
+let _MAX_PENDING = 0x10_000
+let _MAX_FRAGS = 1024
+
+let next t ~now buf hdr =
+  let fproto = hdr.proto
+  and fsrc = hdr.src
+  and fuid = hdr.uid in
+  let fkey = { fproto; fsrc; fuid } in
+  match Hashtbl.find_opt t.frags fkey with
+  | Some { inside= Some inside; _ } ->
+    Ok (Option.to_list (rewrite_dst inside buf))
+  | Some frag when frag.size + hdr.len > _MAX_PENDING ->
+    Hashtbl.remove t.frags fkey;
+    error_msgf "Too many pending fragments"
+  | Some frag ->
+    (* NOTE(dinosaure): [Bytes.to_string] is REALLY important here! *)
+    frag.pending <- Bytes.to_string buf :: frag.pending;
+    frag.size <- frag.size + hdr.len;
+    Ok []
+  | None ->
+    if Hashtbl.length t.frags >= _MAX_FRAGS then clean_up t ~now;
+    if Hashtbl.length t.frags >= _MAX_FRAGS then error_msgf "Too many fragmented datagrams"
+    else begin
+      let pending = [ Bytes.to_string buf ] in
+      let frag = { birth= now; inside= None; pending; size= hdr.len } in
+      Hashtbl.replace t.frags fkey frag;
+      Ok []
+    end
+
 (* from Internet to our private network *)
 let inbound t ~now ?hdr buf =
   let* hdr = match hdr with
@@ -396,7 +476,10 @@ let inbound t ~now ?hdr buf =
       (* NOTE(dinosaure): padding surely added by WireGuard *)
       if Bytes.length buf = hdr.len
       then buf else Bytes.sub buf 0 hdr.len in
-    if not (decr buf) then err_ttl_exceeded
+    if hdr.foff > 0 then next t ~now buf hdr
+    (* NOTE(dinosaure): [decr] has a side effect on [buf]. Don't move it! *)
+    else if not (decr buf) then err_ttl_exceeded
+    else if hdr.mf then frag t ~now buf hdr
     else
       let* inside = translate t ~now buf hdr in
-      Ok [ inside, Bytes.unsafe_to_string buf ]
+      Ok [ inside, buf ]
