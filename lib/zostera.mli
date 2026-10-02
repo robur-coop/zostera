@@ -343,11 +343,27 @@ val confirm :
   -> string
   -> ((responder, confirmed) session * out, [> error ]) result
 
+val confirm_into :
+     now:int
+  -> (responder, pending) session
+  -> string
+  -> ?dst_off:int
+  -> bytes
+  -> ((responder, confirmed) session * int, [> error ]) result
+
 val recv :
      now:int
   -> ('role, confirmed) session
   -> string
   -> (out, [> error ]) result
+
+val recv_into :
+     now:int
+  -> ('role, confirmed) session
+  -> string
+  -> ?dst_off:int
+  -> bytes
+  -> (int, [> error ]) result
 
 val send_into :
      now:int

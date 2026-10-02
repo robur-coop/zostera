@@ -572,15 +572,17 @@ let encrypt_data_into ~key ~counter msg ?(dst_off= 0) buf =
   let tag_off = dst_off + String.length msg in
   Mirage_crypto.Chacha20.authenticate_encrypt_into ~key ~nonce:(nonce counter) msg ~src_off:0 ~tag_off ~dst_off buf len
 
-let decrypt_data ~key ~counter txt =
+let decrypt_data_into ~key ~counter pkt ~src_off ~len ?(dst_off= 0) buf =
   let key = Mirage_crypto.Chacha20.of_secret key in
-  Mirage_crypto.Chacha20.authenticate_decrypt ~key ~nonce:(nonce counter) txt
+  let tag_off = src_off + len in
+  Mirage_crypto.Chacha20.authenticate_decrypt_into ~key ~nonce:(nonce counter)
+    pkt ~src_off ~tag_off buf ~dst_off len
 
 type out =
   [ `Keepalive
   | `Data of string ]
 
-let recv ~now { local; keys; birth; window; _ } pkt =
+let recv_into ~now { local; keys; birth; window; _ } pkt ?(dst_off= 0) buf =
   let* () = guard ~err:(msgf "Truncated data packet") @@ fun () ->
     String.length pkt >= 32 in
   let* () = guard ~err:(msgf "Invalid data packet") @@ fun () ->
@@ -592,10 +594,11 @@ let recv ~now { local; keys; birth; window; _ } pkt =
   let counter = String.get_int64_le pkt 8 in
   let* () = guard ~err:(msgf "Exhausted session") @@ fun () ->
     Int64.unsigned_compare counter _REJECT_AFTER_MESSAGES < 0 in
-  let txt = String.sub pkt 16 (String.length pkt - 16) in
-  let* msg = match decrypt_data ~key:keys.recv ~counter txt with
-    | Some msg -> Ok msg
-    | None -> error_msgf "AEAD authentication failed" in
+  let len = String.length pkt - 32 in
+  let* () = guard ~err:(msgf "Destination buffer too small") @@ fun () ->
+    dst_off >= 0 && Bytes.length buf - dst_off >= len in
+  let* () = guard ~err:(msgf "AEAD authentication failed") @@ fun () ->
+    decrypt_data_into ~key:keys.recv ~counter pkt ~src_off:16 ~len ~dst_off buf in
   (* NOTE(dinosaure): when we receive a packet, we decrypt and only then we
      validate the counter. On wireguard-linux, the execution path is a bit more
      complre due to workqueues but a process decrypt packets and retransmit them
@@ -603,7 +606,13 @@ let recv ~now { local; keys; birth; window; _ } pkt =
      where we validate the counter. *)
   let* () = guard ~err:(msgf "Replayed packet") @@ fun () ->
     Window.validate window counter in
-  if String.length msg = 0 then Ok `Keepalive else Ok (`Data msg)
+  Ok len
+
+let recv ~now session pkt =
+  let len = Int.max 0 (String.length pkt - 32) in
+  let buf = Bytes.create len in
+  let* len = recv_into ~now session pkt buf in
+  if len = 0 then Ok `Keepalive else Ok (`Data (Bytes.unsafe_to_string buf))
 
 (* NOTE(dinosaure): the diff between [recv] and [confirm] is about confirming
    the handshake. The WireGuard paper mentions it when it says: "But, keep in
@@ -626,6 +635,12 @@ let confirm ~now session pkt =
   let* () = guard ~err:(msgf "Session already confirmed") @@ fun () ->
     Atomic.compare_and_set session.confirmed false true in
   Ok ({ session with confirmed= session.confirmed }, data)
+
+let confirm_into ~now session pkt ?dst_off buf =
+  let* len = recv_into ~now session pkt ?dst_off buf in
+  let* () = guard ~err:(msgf "Session already confirmed") @@ fun () ->
+    Atomic.compare_and_set session.confirmed false true in
+  Ok ({ session with confirmed= session.confirmed }, len)
 
 let _PADDING = 16
 
