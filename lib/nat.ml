@@ -67,7 +67,7 @@ let decode str =
   if len < 20 || String.get_uint8 str 0 lsr 4 <> 4
   then err_invalid_ipv4_packet
   else
-    let ihl = (String.get_uint16_be str 0 land 0x0f) * 4 in
+    let ihl = (String.get_uint8 str 0 land 0x0f) * 4 in
     let len = String.get_uint16_be str 2 in
     if ihl < 20 || len < ihl || len > String.length str
     then err_invalid_ipv4_packet
