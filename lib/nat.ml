@@ -398,7 +398,7 @@ let translate t ~now buf hdr =
     let rproto = hdr.proto
     and eport = Bytes.get_uint16_be buf (off + 2) (* TCP/UPD port *)
     and from = hdr.src
-    and fport = 0 in
+    and fport = Bytes.get_uint16_be buf off in
     let rkey = { rproto; eport; from; fport } in
     begin match Hashtbl.find_opt t.ins rkey with
     | None -> error_msgf "No mapping for the given packet"
