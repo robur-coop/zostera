@@ -1,3 +1,5 @@
 (executable
  (name main)
- (libraries zostera))
+ (modules main)
+ (enabled_if (= %{context_name} "default"))
+ (libraries mirage-crypto-rng.unix zostera))
