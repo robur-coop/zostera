@@ -7,3 +7,8 @@
  (name z)
  (modules z)
  (libraries test zostera))
+
+(test
+ (name b)
+ (modules b)
+ (libraries test zostera zostera.bruit mirage-crypto-rng.unix))
