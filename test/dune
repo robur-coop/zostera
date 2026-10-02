@@ -1,14 +1,27 @@
 (library
  (name test)
  (modules test)
+ (enabled_if (= %{context_name} "default"))
  (libraries unix))
 
-(test
+(executable
  (name z)
  (modules z)
+ (enabled_if (= %{context_name} "default"))
  (libraries test zostera))
 
-(test
+(executable
  (name b)
  (modules b)
+ (enabled_if (= %{context_name} "default"))
  (libraries test zostera zostera.bruit mirage-crypto-rng.unix))
+
+(rule
+ (alias runtest)
+ (deps z.exe)
+ (action (run ./z.exe)))
+
+(rule
+ (alias runtest)
+ (deps b.exe)
+ (action (run ./b.exe)))
