@@ -345,6 +345,14 @@ val recv :
   -> string
   -> (out, [> error ]) result
 
+val send_into :
+     now:int
+  -> ('role, confirmed) session
+  -> string
+  -> ?dst_off:int
+  -> bytes
+  -> (unit, [> error ]) result
+
 val send :
      now:int
   -> ('role, confirmed) session

@@ -557,9 +557,11 @@ let nonce counter =
   Bytes.set_int64_le buf 4 counter;
   Bytes.unsafe_to_string buf
 
-let encrypt_data ~key ~counter msg =
+let encrypt_data_into ~key ~counter msg ?(dst_off= 0) buf =
   let key = Mirage_crypto.Chacha20.of_secret key in
-  Mirage_crypto.Chacha20.authenticate_encrypt ~key ~nonce:(nonce counter) msg
+  let len = String.length msg in
+  let tag_off = dst_off + String.length msg in
+  Mirage_crypto.Chacha20.authenticate_encrypt_into ~key ~nonce:(nonce counter) msg ~src_off:0 ~tag_off ~dst_off buf len
 
 let decrypt_data ~key ~counter txt =
   let key = Mirage_crypto.Chacha20.of_secret key in
@@ -618,7 +620,7 @@ let confirm ~now session pkt =
 
 let _PADDING = 16
 
-let send ~now ({ remote; keys; birth; _ } as session) msg =
+let send_into ~now ({ remote; keys; birth; _ } as session) msg ?(dst_off= 0) pkt =
   let* () = guard ~err:(msgf "Expired session") @@ fun () ->
     now - birth < _REJECT_AFTER_TIME in
   let counter = !(session.counter) in
@@ -628,16 +630,21 @@ let send ~now ({ remote; keys; birth; _ } as session) msg =
   let len = String.length msg in
   let pad = (_PADDING - (len mod _PADDING)) land (_PADDING - 1) in
   (* TODO(dinosaure): don't overflow the MTU *)
-  let buf = Bytes.make (len + pad) '\000' in
-  Bytes.blit_string msg 0 buf 0 len;
-  let txt = encrypt_data ~key:keys.send ~counter (Bytes.unsafe_to_string buf) in
-  let pkt = Bytes.make (16 + String.length txt) '\000' in
-  (* TODO(dinosaure): use authenticate_encrypt_into *)
-  Bytes.set_uint8 pkt 0 4;
-  Bytes.set_int32_le pkt 4 (remote :> int32);
-  Bytes.set_int64_le pkt 8 counter;
-  Bytes.blit_string txt 0 pkt 16 (String.length txt);
-  Ok (Bytes.unsafe_to_string pkt)
+  let tmp = Bytes.make (len + pad) '\000' in
+  Bytes.blit_string msg 0 tmp 0 len;
+  let tmp = Bytes.unsafe_to_string tmp in
+  encrypt_data_into ~key:keys.send ~counter ~dst_off:(dst_off + 16) tmp pkt;
+  Bytes.set_uint8 pkt (dst_off + 0) 4;
+  Bytes.set_int32_le pkt (dst_off + 4) (remote :> int32);
+  Bytes.set_int64_le pkt (dst_off + 8) counter;
+  Ok ()
+
+let send ~now session msg =
+  let len = String.length msg in
+  let pad = (_PADDING - (len mod _PADDING)) land (_PADDING - 1) in
+  let buf = Bytes.make (16 + len + pad + Mirage_crypto.Chacha20.tag_size) '\000' in
+  let* () = send_into ~now session msg ~dst_off:0 buf in
+  Ok (Bytes.unsafe_to_string buf)
 
 let keepalive ~now session = send ~now session String.empty
 
