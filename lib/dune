@@ -6,6 +6,6 @@
 
 (library
  (name bruit)
- (modules bruit timers)
+ (modules bruit timers ecn)
  (public_name zostera.bruit)
  (libraries fmt zostera))
