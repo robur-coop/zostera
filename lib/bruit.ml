@@ -14,6 +14,8 @@ type previous =
   | Confirmed : ('r, confirmed) session -> previous
   | Unconfirmed : (responder, pending) session -> previous
 
+module Ecn = Ecn
+
 module Q = struct
   type 'a t = { front : 'a list; back : 'a list; len : int }
 
@@ -65,7 +67,7 @@ type t =
   ; g : Mirage_crypto_rng.g option }
 
 type action =
-  [ `Send of Zostera.Addr.t * string
+  [ `Send of Zostera.Addr.t * int * string (* dst, ds, pkt *)
   | `Deliver of Zostera.public * string
   | `Drop of Zostera.public * string
   | `Error of error ]
@@ -182,7 +184,7 @@ let send_handshake_initiation t ~timestamp ~now peer edn r_events =
         |> Timers.handshake_sent ~now
         |> Timers.handshake_initiated ~now ~jitter:(jitter t) in
       let peer = { peer with handshake= Some state; last_sent= Some now; timers } in
-      (peer, `Send (edn, pkt) :: `Register uid :: r_events)
+      (peer, `Send (edn, Ecn._HANDSHAKE_DSCP, pkt) :: `Register uid :: r_events)
 
 (* [wg_packet_send_queued_handshake_initiation]
 
@@ -239,11 +241,13 @@ let send_staged_packets t ~timestamp ~now peer r_events =
       let fn acc data =
         let* r_pkts = acc in
         let* pkt = Zostera.send ~now session data in
-        Ok ((pkt, not (String.is_empty data)) :: r_pkts) in
+        (* NOTE(dinosaure): see [ip_tunnel_ecn_encap], ECN bits of the inner
+           packet are copied to the outer one. *)
+        Ok ((pkt, Ecn.encap data, not (String.is_empty data)) :: r_pkts) in
       begin match List.fold_left fn (Ok []) (Q.to_list peer.queue) with
       | Ok r_pkts ->
-        let data_sent = List.exists snd r_pkts in
-        let fn r_events (pkt, _) = `Send (edn, pkt) :: r_events in
+        let data_sent = List.exists (fun (_, _, data) -> data) r_pkts in
+        let fn r_events (pkt, ds, _) = `Send (edn, ds, pkt) :: r_events in
         let r_events = List.fold_left fn r_events (List.rev r_pkts) in
         let peer = { peer with queue= Q.empty } in
         create_data_done t ~timestamp ~now ~data_sent peer r_events
@@ -309,7 +313,7 @@ let keep_key_fresh_on_recv t ~timestamp ~now peer r_events =
 let on_msg1 t ~now ~load ~from pkt =
   let* out = Zostera.msg1_of_string ?g:t.g t.bakery t.limiter ~now ~load ~peer:from pkt in
   match out with
-  | `Cookie pkt -> Ok [ `Send (from, pkt) ]
+  | `Cookie pkt -> Ok [ `Send (from, 0, pkt) ]
   | `Msg1 msg1 ->
     let found = ref None in
     let fn public =
@@ -363,14 +367,14 @@ let on_msg1 t ~now ~load ~from pkt =
                 ; last_recv= Some now; last_sent= Some now
                 ; prev= None; next= Some session; timers } in
     (* NOTE(dinosaure): do [forget] first, [`Register] then and [`Send]. *)
-    let r_events = (`Send (from, pkt) :: `Register uid :: forget) in
+    let r_events = (`Send (from, Ecn._HANDSHAKE_DSCP, pkt) :: `Register uid :: forget) in
     Ok (apply t peer (List.rev r_events))
 
 (* [MESSAGE_HANDSHAKE_RESPONSE] from [wg_receive_handshake_packet]. *)
 let on_msg2 t ~timestamp ~now ~load ~from uid peer pkt =
   let* out = Zostera.msg2_of_string ?g:t.g t.bakery t.limiter ~now ~load ~peer:from pkt in
   match out, peer.handshake with
-  | `Cookie pkt, _ -> Ok (peer, [ `Send (from, pkt) ])
+  | `Cookie pkt, _ -> Ok (peer, [ `Send (from, 0, pkt) ])
   | `Msg2 _, None -> error_msgf "Unexpected handshake response"
   | `Msg2 msg2, Some state ->
     (* NOTE(dinosaure): due to [Some state], we prove that we are the initiator.
@@ -437,7 +441,7 @@ let rotate peer session =
   ({ peer with prev; curr= Some (Current session); next= None }, forget)
 
 (* [wg_packet_consume_data_done] *)
-let on_data t ~timestamp ~now ~from uid peer pkt =
+let on_data t ~timestamp ~now ~ds ~from uid peer pkt =
   let* peer, out, confirmed, r_events = match peer with
     | { next= Some next; _ } when Zostera.uid_of_local next = uid ->
       let* session, out = Zostera.confirm ~now next pkt in
@@ -467,6 +471,9 @@ let on_data t ~timestamp ~now ~from uid peer pkt =
     | `Keepalive -> (timers, r_events)
     | `Data data ->
       let public = Zostera.public_of_remote peer.remote in
+      (* NOTE(dinosaure): see [wg_packet_consume_data_done], the ECN bits of
+         the outer packet are propagated to the inner one. *)
+      let data = Ecn.decap ~outer:ds data in
       (Timers.data_received ~now timers, `Deliver (public, data) :: r_events) in
   let peer = { peer with edn= Some from; last_recv= Some now; timers } in
   let peer, r_events =
@@ -474,7 +481,7 @@ let on_data t ~timestamp ~now ~from uid peer pkt =
     else (peer, r_events) in
   Ok (keep_key_fresh_on_recv t ~timestamp ~now peer r_events)
 
-let packet t ~timestamp ~now ?(pending = 0) ~from pkt =
+let packet t ~timestamp ~now ?(pending = 0) ?(ds = 0) ~from pkt =
   let* k =
     let* () = guard ~err:(msgf "Truncated WireGuard packet") @@ fun () ->
       String.length pkt >= 4 in
@@ -491,7 +498,7 @@ let packet t ~timestamp ~now ?(pending = 0) ~from pkt =
     let* peer, r_events = match k with
       | 2l -> on_msg2 t ~timestamp ~now ~load:(load ()) ~from uid peer pkt
       | 3l -> on_cookie ~now uid peer pkt
-      | _ -> on_data t ~timestamp ~now ~from uid peer pkt in
+      | _ -> on_data t ~timestamp ~now ~ds ~from uid peer pkt in
     Ok (apply t peer (List.rev r_events))
   | _ -> error_msgf "Unknown packet type"
 

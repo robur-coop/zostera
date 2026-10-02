@@ -44,7 +44,7 @@ let run ?(lose = fun _src _pkt -> false) ~now nodes src actions =
   let sent = ref [] and delivered = ref [] and dropped = ref [] in
   let rec go src actions =
     let fn = function
-      | `Send (dst, pkt) ->
+      | `Send (dst, _ds, pkt) ->
         sent := (src.addr, kind pkt, String.length pkt) :: !sent;
         if not (lose src pkt) then begin
           match List.find_opt (fun n -> n.addr = dst) nodes with

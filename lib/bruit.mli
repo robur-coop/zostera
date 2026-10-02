@@ -3,8 +3,16 @@ type error = Zostera.error
 
 val create : ?g:Mirage_crypto_rng.g -> Zostera.t -> t
 
+module Ecn : sig
+  val _HANDSHAKE_DSCP : int
+
+  val dsfield : string -> int
+  val encap : string -> int
+  val decap : outer:int -> string -> string
+end
+
 type action =
-  [ `Send of Zostera.Addr.t * string
+  [ `Send of Zostera.Addr.t * int * string
   | `Deliver of Zostera.public * string
   | `Drop of Zostera.public * string
   | `Error of error ]
@@ -26,6 +34,7 @@ val packet :
   -> timestamp:int
   -> now:int
   -> ?pending:int
+  -> ?ds:int
   -> from:Zostera.Addr.t
   -> string
   -> (action list, [> error ]) result
