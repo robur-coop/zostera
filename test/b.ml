@@ -164,11 +164,28 @@ let test005 =
   Test.check (count ~src:a ~kind:_DATA trace = 0);
   Test.check (trace.delivered = [])
 
+let test006 =
+  let descr = {text|persistent keepalive|text} in
+  Test.test ~title:"test006" ~descr @@ fun () ->
+  let now = 1_000 * _1s in
+  let a, b, actions = pair ~persistent_keepalive:25 ~now () in
+  let trace = run ~now [ a; b ] a actions in
+  Test.check (count ~src:a ~kind:_MSG1 trace = 1);
+  Test.check (count ~src:a ~kind:_DATA trace = 1);
+  for i = 1 to 3 do
+    let now = now + (i * 25 * _1s) in
+    let trace = tick ~now:(now - 1) [ a; b ] a in
+    Test.check (trace.sent = []);
+    let trace = tick ~now [ a; b ] a in
+    (* A keepalive every 25s *)
+    Test.check (trace.sent = [ a.addr, _DATA, _KEEPALIVE_LEN ])
+  done
+
 let ( / ) = Filename.concat
 
 let () =
   Mirage_crypto_rng_unix.use_default ();
-  let tests = [ test001; test002; test003; test004; test005 ] in
+  let tests = [ test001; test002; test003; test004; test005; test006 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);
