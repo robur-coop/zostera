@@ -3,7 +3,17 @@
    send. So we can not ensure an uninterruptible execution path between what we
    receive from a private network and what we would like to encrypt and send.
    Even if it exists [Zostera.send_into], it's too complicate for us to use it.
-   This reflexion is for [outbound]. Let's see later for [inbound]. *)
+   This reflexion is for [outbound]. Let's see later for [inbound].
+
+   NOTE(dinosaure): [outbound] and [inbound] take a [bytes] because they set it
+   in place to avoid a copy. Because of [adjust], we can play without copies to
+   incoming packets and set [src]/[dst] according to what we track. It's a bit
+   ugly but eh... we would like perform 9000. On the top layer (our unikernel),
+   we do a copy because we manipulate [Bstr.t] but, in anyway, we do copies
+   because:
+   - as we said for [outbound], [Bruit] keeps a queue of what we would like to
+     send and encrypt.
+   - for [inbound], [Bruit] gives to us [string] in any way. *)
 
 let _MIN_PORT = 1024
 let _1s = 1_000_000_000
@@ -58,6 +68,9 @@ let decode str =
       let src = Ipaddr.V4.of_int32 (String.get_int32_be str 12) in
       let dst = Ipaddr.V4.of_int32 (String.get_int32_be str 16) in
       Ok { ihl; len; uid; df; mf; foff; proto; src; dst; }
+
+let getipv4 str off =
+  Ipaddr.V4.of_int32 (String.get_int32_be str off)
 
 (* RFC 1624: chk = ~(~chk + ~old + new) *)
 let adjust csum ~old v =
@@ -238,12 +251,12 @@ let outbound t ~now ?mss ?hdr buf =
       setipv4 buf 12 t.public ~csums:[ (10, false) ];
       set16 buf (off + 4) eport ~csums:[ (off + 2, false) ]
     end else begin
-      let len4 =
+      let l4 =
         if hdr.proto = _TCP
         then (off + 16, false)
         else (off + 6, true) in
-      setipv4 buf 12 t.public ~csums:[ (10, false); len4 ];
-      set16 buf off eport ~csums:[ len4 ];
+      setipv4 buf 12 t.public ~csums:[ (10, false); l4 ];
+      set16 buf off eport ~csums:[ l4 ];
       if hdr.proto = _TCP then begin
         track (Bytes.unsafe_to_string buf) off entry;
         let fn mss = clamp buf ~off ~len ~mss in
@@ -259,7 +272,7 @@ let fragment buf ~mtu =
   else if mtu < ihl + 8 then invalid_arg "MTU too small"
   else
     let flags = Bytes.get_uint16_be buf 6 in
-    let mf = flags land 0x2000 <> 0 and foff = (flags land 0x1ffff) * 8 in
+    let mf = flags land 0x2000 <> 0 and foff = (flags land 0x1fff) * 8 in
     let payload = len - ihl in
     let rec go pos acc =
       if pos >= payload then List.rev acc
@@ -281,3 +294,109 @@ let fragment buf ~mtu =
            to optimize such call (because we don't have cross-module optimisations). *)
         go (pos + size) (frag :: acc) in
     go 0 []
+
+let error t ~now buf hdr =
+  let off = hdr.ihl in
+  let inner = off + 8 in
+  if hdr.len - inner < 28 then error_msgf "Truncated ICMP error"
+  else
+    (* NOTE(dinosaure): let's try to introspect the ICMP error and the IPv4
+       packet inside it (if it corresponds to a tracked connection). *)
+    let iihl = (Bytes.get_uint8 buf inner land 0x0f) * 4 in
+    let proto = Bytes.get_uint8 buf (inner + 9) in
+    let src = getipv4 (Bytes.unsafe_to_string buf) (inner + 12)
+    and dst = getipv4 (Bytes.unsafe_to_string buf) (inner + 16) in
+    let ifoff = Bytes.get_uint16_be buf (inner + 6) land 0x1fff in
+    if iihl < 20 || hdr.len - inner < iihl + 8 || ifoff <> 0
+    || not (Ipaddr.V4.compare src t.public = 0)
+    then error_msgf "Unexpected ICMP error"
+    else
+      let l4 = inner + iihl in
+      let rkey =
+        if proto = _TCP || proto = _UDP
+        then
+          let rproto = proto
+          and eport = Bytes.get_uint16_be buf l4
+          and from = dst
+          and fport = Bytes.get_uint16_be buf (l4 * 2) in
+          Some { rproto; eport; from; fport }
+        else if proto = _ICMP && Bytes.get_uint8 buf l4 = 8
+        then
+          let rproto = proto
+          and eport = Bytes.get_uint16_be buf (l4 + 4)
+          and from = dst
+          and fport = 0 in
+          Some { rproto; eport; from; fport }
+        else None in
+      match Option.bind rkey (Hashtbl.find_opt t.ins) with
+      | None -> error_msgf "ICMP error without mapping"
+      | Some entry ->
+        entry.seen <- now;
+        setipv4 buf 16 entry.key.inside ~csums:[ (10, false) ];
+        setipv4 buf (inner + 12) entry.key.inside ~csums:[ (inner + 10, false) ];
+        if proto = _ICMP
+        then Bytes.set_uint16_be buf (l4 + 4) entry.key.iport
+        else Bytes.set_uint16_be buf l4 entry.key.iport;
+        (* NOTE(dinosaure): we don't compute the checksum of the inner packet. *)
+        Bytes.set_uint16_be buf (off + 2) 0; (* ICMP checksum *)
+        Bytes.set_uint16_be buf (off + 2)
+          (Utcp.Checksum.digest_string ~off ~len:(hdr.len - off) (Bytes.unsafe_to_string buf));
+        Ok entry.key.inside
+
+let translate t ~now buf hdr =
+  let off = hdr.ihl and len = hdr.len - hdr.ihl in
+  if hdr.proto = _ICMP && len >= 8 then
+    match Bytes.get_uint8 buf off with
+    | 0 ->
+      let rproto = _ICMP
+      and eport = Bytes.get_uint16_be buf (off + 4)
+      and from = hdr.src
+      and fport = 0 in
+      let rkey = { rproto; eport; from; fport } in
+      begin match Hashtbl.find_opt t.ins rkey with
+      | None -> error_msgf "ICMP echo reply without mapping"
+      | Some entry ->
+        entry.seen <- now;
+        setipv4 buf 16 entry.key.inside ~csums:[ (10, false) ];
+        set16 buf (off + 4) entry.key.iport ~csums:[ (off + 2, false) ];
+        Ok entry.key.inside end
+    (* 3: Destination unreachable
+       11: Time Exceeded
+       12: Bad IP header *)
+    | 3 | 11 | 12 -> error t ~now buf hdr
+    | n -> error_msgf "Unsupported ICMP message %d" n
+  else if hdr.proto = _TCP && len >= 20
+       || hdr.proto = _UDP && len >= 8
+  then
+    let rproto = hdr.proto
+    and eport = Bytes.get_uint16_be buf (off + 2) (* TCP/UPD port *)
+    and from = hdr.src
+    and fport = 0 in
+    let rkey = { rproto; eport; from; fport } in
+    begin match Hashtbl.find_opt t.ins rkey with
+    | None -> error_msgf "No mapping for the given packet"
+    | Some entry ->
+      entry.seen <- now;
+      let l4 = if hdr.proto = _TCP then (off + 16, false) else (off + 6, true) in
+      setipv4 buf 16 entry.key.inside ~csums:[ (10, false); l4 ];
+      set16 buf (off + 2) entry.key.iport ~csums:[ l4 ];
+      if hdr.proto = _TCP then track (Bytes.unsafe_to_string buf) off entry;
+      Ok entry.key.inside end
+  else error_msgf "Unsupported protocol %d" hdr.proto
+
+(* from Internet to our private network *)
+let inbound t ~now ?hdr buf =
+  let* hdr = match hdr with
+    | Some hdr -> Ok hdr
+    | None -> decode (Bytes.unsafe_to_string buf) in
+  if not (Ipaddr.V4.compare hdr.dst t.public = 0)
+  then error_msgf "Packet for %a" Ipaddr.V4.pp hdr.dst
+  else
+    let buf =
+      (* NOTE(dinosaure): padding surely added by WireGuard *)
+      if Bytes.length buf = hdr.len
+      then buf else Bytes.sub buf 0 hdr.len in
+    if not (decr buf) then err_ttl_exceeded
+    else
+      let* inside = translate t ~now buf hdr in
+      Ok [ inside, Bytes.unsafe_to_string buf ]
