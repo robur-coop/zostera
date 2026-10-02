@@ -213,11 +213,28 @@ let test007 =
   Test.check (count ~src:b ~kind:_MSG2 trace = 1); (* handshake done! *)
   Test.check (trace.delivered = [ (b.addr, padded "hello" )]) (* see our first [msg1] *)
 
+let test008 =
+  let descr = {text|under load for 1s|text} in
+  Test.test ~title:"test008" ~descr @@ fun () ->
+  let now = 1_000 * _1s in
+  let a, b, _ = pair ~now () in
+  let pkt = msg1 ~now a b in
+  let out = receive ~now ~pending:511 ~from:a b pkt in
+  Test.check (List.map kind out = [ _MSG2 ]); (* not under load *)
+  let a, b, _ = pair ~now () in
+  let pkt = msg1 ~now a b in
+  let out = receive ~now ~pending:512 ~from:a b pkt in
+  Test.check (List.map kind out = [ _COOKIE ]); (* under load *)
+  let out = receive ~now:(now + _1s - 1) ~from:a b pkt in
+  Test.check (List.map kind out = [ _COOKIE ]); (* still under load *)
+  let out = receive ~now:(now + _1s) ~from:a b pkt in
+  Test.check (List.map kind out = [ _MSG2 ]) (* handshake done! *)
+
 let ( / ) = Filename.concat
 
 let () =
   Mirage_crypto_rng_unix.use_default ();
-  let tests = [ test001; test002; test003; test004; test005; test006; test007 ] in
+  let tests = [ test001; test002; test003; test004; test005; test006; test007; test008 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);
