@@ -107,7 +107,7 @@ let setipv4 buf off ipaddr ~csums =
   let v = Ipaddr.V4.to_int32 ipaddr in
   let v = Int32.to_int v land 0xffffffff in
   set16 buf off (v lsr 16) ~csums;
-  set16 buf (off + 2) (v land 0xfffff) ~csums
+  set16 buf (off + 2) (v land 0xffff) ~csums
 
 let decr buf =
   let ttl = Bytes.get_uint8 buf 8 in
