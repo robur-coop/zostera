@@ -9,11 +9,12 @@ module Ecn : sig
   val dsfield : string -> int
   val encap : string -> int
   val decap : outer:int -> string -> string
+  val decap_into : outer:int -> bytes -> len:int -> unit
 end
 
 type action =
   [ `Send of Zostera.Addr.t * int * string
-  | `Deliver of Zostera.public * string
+  | `Deliver of Zostera.public * bytes * int
   | `Drop of Zostera.public * string
   | `Error of error ]
 
@@ -35,6 +36,7 @@ val packet :
   -> now:int
   -> ?pending:int
   -> ?ds:int
+  -> ?buf:bytes
   -> from:Zostera.Addr.t
   -> string
   -> (action list, [> error ]) result

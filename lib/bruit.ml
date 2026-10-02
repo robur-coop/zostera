@@ -68,7 +68,7 @@ type t =
 
 type action =
   [ `Send of Zostera.Addr.t * int * string (* dst, ds, pkt *)
-  | `Deliver of Zostera.public * string
+  | `Deliver of Zostera.public * bytes * int
   | `Drop of Zostera.public * string
   | `Error of error ]
 
@@ -440,22 +440,37 @@ let rotate peer session =
     | None -> None in
   ({ peer with prev; curr= Some (Current session); next= None }, forget)
 
+(* NOTE(dinosaure): [buf] is a trick to use a pre-allocated buffer to decrypt
+   incoming packets directly to this buffer (and avoid an allocation). If the
+   given buffer is too small, we just ignore it and allocate a new one.
+
+   TODO(dinosaure): we probably should not propose such API and have something
+   like [packet_into] and raises [Invalid_argument] if the given buffer is too
+   small. But now, my head will explode. *)
+
+let buffer_for ?buf pkt =
+  let need = Int.max 0 (String.length pkt - 32) in
+  match buf with
+  | Some buf when Bytes.length buf >= need -> buf
+  | Some _ | None -> Bytes.create need
+
 (* [wg_packet_consume_data_done] *)
-let on_data t ~timestamp ~now ~ds ~from uid peer pkt =
-  let* peer, out, confirmed, r_events = match peer with
+let on_data t ~timestamp ~now ~ds ?buf ~from uid peer pkt =
+  let buf = buffer_for ?buf pkt in
+  let* peer, len, confirmed, r_events = match peer with
     | { next= Some next; _ } when Zostera.uid_of_local next = uid ->
-      let* session, out = Zostera.confirm ~now next pkt in
+      let* session, len = Zostera.confirm_into ~now next pkt buf in
       let peer, r_events = rotate peer session in
-      Ok (peer, out, true, r_events)
+      Ok (peer, len, true, r_events)
     | { curr= Some (Current curr); _ } when Zostera.uid_of_local curr = uid ->
-      let* out = Zostera.recv ~now curr pkt in
-      Ok (peer, out, false, [])
+      let* len = Zostera.recv_into ~now curr pkt buf in
+      Ok (peer, len, false, [])
     | { prev= Some (Confirmed prev); _ } when Zostera.uid_of_local prev = uid ->
-      let* out = Zostera.recv ~now prev pkt in
-      Ok (peer, out, false, [])
+      let* len = Zostera.recv_into ~now prev pkt buf in
+      Ok (peer, len, false, [])
     | { prev= Some (Unconfirmed prev); _ } when Zostera.uid_of_local prev = uid ->
-      let* session, out = Zostera.confirm ~now prev pkt in
-      Ok ({ peer with prev= Some (Confirmed session) }, out, false, [])
+      let* session, len = Zostera.confirm_into ~now prev pkt buf in
+      Ok ({ peer with prev= Some (Confirmed session) }, len, false, [])
     | _ -> error_msgf "Unexpected receiver" in
   (* NOTE(dinosaure): only now, after decryption and validation of the
      counter, we can update the endpoint. *)
@@ -467,21 +482,21 @@ let on_data t ~timestamp ~now ~ds ~from uid peer pkt =
     timers
     |> Timers.any_authenticated_packet_received
     |> Timers.any_authenticated_packet_traversal ~now in
-  let timers, r_events = match out with
-    | `Keepalive -> (timers, r_events)
-    | `Data data ->
+  let timers, r_events =
+    if len = 0 (* keepalive *) then (timers, r_events)
+    else
       let public = Zostera.public_of_remote peer.remote in
       (* NOTE(dinosaure): see [wg_packet_consume_data_done], the ECN bits of
          the outer packet are propagated to the inner one. *)
-      let data = Ecn.decap ~outer:ds data in
-      (Timers.data_received ~now timers, `Deliver (public, data) :: r_events) in
+      Ecn.decap_into ~outer:ds buf ~len;
+      (Timers.data_received ~now timers, `Deliver (public, buf, len) :: r_events) in
   let peer = { peer with edn= Some from; last_recv= Some now; timers } in
   let peer, r_events =
     if confirmed then send_staged_packets t ~timestamp ~now peer r_events
     else (peer, r_events) in
   Ok (keep_key_fresh_on_recv t ~timestamp ~now peer r_events)
 
-let packet t ~timestamp ~now ?(pending = 0) ?(ds = 0) ~from pkt =
+let packet t ~timestamp ~now ?(pending = 0) ?(ds = 0) ?buf ~from pkt =
   let* k =
     let* () = guard ~err:(msgf "Truncated WireGuard packet") @@ fun () ->
       String.length pkt >= 4 in
@@ -498,7 +513,7 @@ let packet t ~timestamp ~now ?(pending = 0) ?(ds = 0) ~from pkt =
     let* peer, r_events = match k with
       | 2l -> on_msg2 t ~timestamp ~now ~load:(load ()) ~from uid peer pkt
       | 3l -> on_cookie ~now uid peer pkt
-      | _ -> on_data t ~timestamp ~now ~ds ~from uid peer pkt in
+      | _ -> on_data t ~timestamp ~now ~ds ?buf ~from uid peer pkt in
     Ok (apply t peer (List.rev r_events))
   | _ -> error_msgf "Unknown packet type"
 
