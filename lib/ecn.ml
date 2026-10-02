@@ -66,3 +66,29 @@ let decap ~outer pkt =
     (* [INET_ECN_set_ect1] *)
     set_dsfield pkt (inner lxor _MASK)
   else pkt
+
+let dsfield_into buf ~len =
+  if len > 1 then match Bytes.get_uint8 buf 0 lsr 4 with
+    | 4 when len >= 20 -> Bytes.get_uint8 buf 1
+    | 6 when len >= 40 -> (Bytes.get_uint16_be buf 0 lsr 4) land 0xff
+    | _ -> 0
+  else 0
+
+let set_dsfield_into buf ds =
+  let old = Bytes.get_uint16_be buf 0 in
+  if Bytes.get_uint8 buf 0 lsr 4 = 4 then begin
+    let v = (old land 0xff00) lor ds in
+    Bytes.set_uint16_be buf 0 v;
+    Bytes.set_uint16_be buf 10 (adjust (Bytes.get_uint16_be buf 10) ~old v)
+  end else
+    Bytes.set_uint16_be buf 0 ((old land 0xf00f) lor (ds lsl 4))
+
+let decap_into ~outer buf ~len =
+  let inner = dsfield_into buf ~len in
+  if inner land _MASK = _NOT_ECT then ()
+  else if outer land _MASK = _CE then begin
+    (* [INET_ECN_set_ce] *)
+    if inner land _MASK <> _CE then set_dsfield_into buf (inner lor _CE) end
+  else if outer land _MASK = _ECT_1 && inner land _MASK = _ECT_0 then
+    (* [INET_ECN_set_ect1] *)
+    set_dsfield_into buf (inner lxor _MASK)
