@@ -1,6 +1,6 @@
-let test00 =
+let test001 =
   let descr = {text|tai64n|text} in
-  Test.test ~title:"test00" ~descr @@ fun () ->
+  Test.test ~title:"test001" ~descr @@ fun () ->
   let str0 = Zostera.tai64n ~now:0 in
   Test.check (str0 = "\x40\x00\x00\x00\x00\x00\x00\x0a\x00\x00\x00\x00");
   let _10ns = 10 in
@@ -18,9 +18,9 @@ let test00 =
     Test.check (Eqaf.compare_be str0 str < 0 = expected) in
   List.iter fn tests
 
-let test01 =
+let test002 =
   let descr = {text|limiter|text} in
-  Test.test ~title:"test01" ~descr @@ fun () ->
+  Test.test ~title:"test002" ~descr @@ fun () ->
   let process =
     [| (true, None, "initial burst")
      ; (true, None, "initial burst")
@@ -67,9 +67,9 @@ let reject_after_messages =
   let open Int64 in
   sub (neg (shift_left 1L 13)) 1L (* -8193 *)
 
-let test02 =
+let test003 =
   let descr = {text|window|text} in
-  Test.test ~title:"test02" ~descr @@ fun () ->
+  Test.test ~title:"test003" ~descr @@ fun () ->
   let module Window = Zostera.Window in
   let res = ref true in
   let w = Window.make () in
@@ -161,7 +161,7 @@ let test02 =
 let ( / ) = Filename.concat
 
 let () =
-  let tests = [ test00; test01; test02 ] in
+  let tests = [ test001; test002; test003 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);
