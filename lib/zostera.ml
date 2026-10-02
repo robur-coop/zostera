@@ -202,6 +202,15 @@ let gen ?g () : secret * public =
     |> BLAKE2S.to_raw_string in
   (secret, (public, _K))
 
+let of_octets str =
+  match Mirage_crypto_ec.X25519.secret_of_octets str with
+  | Error (#Mirage_crypto_ec.error as err) -> Error err
+  | Ok (secret, public) ->
+    let open Digestif in
+    let _K = BLAKE2S.digest_string (strf "mac1----%s" public)
+      |> BLAKE2S.to_raw_string in
+    Ok (secret, (public, _K))
+
 let public_of_octets str =
   if String.length str <> 32 then invalid_arg "Zostera.public_of_octets: invalid public key";
   let open Digestif in

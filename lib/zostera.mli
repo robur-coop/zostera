@@ -61,6 +61,10 @@ type public
 val gen : ?g:Mirage_crypto_rng.g -> unit -> t
 (** [gen ?g ()] generates a new identity. *)
 
+val of_octets : string -> (t, [> error ]) result
+(** [of_octets raw] is the identity whose X25519 secret is the given 32 raw
+    bytes (for instance, the base64-decoded output of [wg genkey]). *)
+
 val public_of_octets : string -> public
 (** [public_of_octets raw] is a peer's public key from its 32 raw bytes. Note
     that every 32-byte string is a {i valid} X25519 public key. Low-order points
