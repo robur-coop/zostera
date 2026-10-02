@@ -105,11 +105,27 @@ let test002 =
   let trace = tick ~now:(now + 20 * _1s) [ a; b ] a in
   Test.check (trace.sent = []) (* Again, silence is a virtue! *)
 
+let test003 =
+  let descr = {text|new handshake after timeouts|text} in
+  Test.test ~title:"test003" ~descr @@ fun () ->
+  let now = 1_000 * _1s in
+  let a, b, _ = pair ~now () in
+  handshake ~now a b;
+  let _ = tick ~now:(now + 10 * _1s) [ a; b ] b in (* keepalive *)
+  let lose src _pkt = src.addr = b.addr in (* lose responder's packets *)
+  let now = now + 30 * _1s in
+  let _ = write ~lose ~now [ a; b ] a b "hého!" in
+  let trace = tick ~lose ~now:(now + 14 * _1s) [ a; b ] a in
+  Test.check (count ~src:a ~kind:_MSG1 trace = 0);
+  let trace = tick ~lose ~now:(now + 15 * _1s + 334_000_000) [ a; b ] a in
+  (* our initiator retry an handshake after _KEEPALIVE_TIMEOUT + _REKEY_TIMEOUT + jitter (<= 333ms) *)
+  Test.check (count ~src:a ~kind:_MSG1 trace = 1)
+
 let ( / ) = Filename.concat
 
 let () =
   Mirage_crypto_rng_unix.use_default ();
-  let tests = [ test001; test002 ] in
+  let tests = [ test001; test002; test003 ] in
   let ({ Test.directory } as runner) = Test.runner (Sys.getcwd () / "_tests") in
   let run idx test =
     Format.printf "test%03d: %!" (succ idx);
