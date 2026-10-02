@@ -1,0 +1,44 @@
+(executable
+ (name wg)
+ (modules wg outer inner)
+ (public_name wg)
+ (modes native)
+ (link_flags :standard -cclib "-z solo5-abi=hvt")
+ (libraries
+  mkernel
+  mirage-crypto-rng-mkernel
+  tally-mnet
+  zostera
+  zostera.bruit
+  zostera.nat
+  base64
+  utcp
+  mnet
+  mnet-cli)
+ (foreign_stubs
+  (language c)
+  (names manifest.wg)))
+
+(rule
+ (targets manifest.wg.c)
+ (enabled_if
+  (= %{context_name} "default"))
+ (action
+  (write-file manifest.wg.c "")))
+
+(rule
+ (targets manifest.wg.c)
+ (deps manifest.wg.json)
+ (enabled_if
+  (= %{context_name} "solo5"))
+ (action
+  (run solo5-elftool gen-manifest manifest.wg.json manifest.wg.c)))
+
+(rule
+ (targets manifest.wg.json)
+ (enabled_if
+  (= %{context_name} "solo5"))
+ (action
+  (with-stdout-to
+   manifest.wg.json
+   (run %{exe:wg.exe} --ipv4=0.0.0.0/24 --private-ipv4=0.0.0.0/24))))
