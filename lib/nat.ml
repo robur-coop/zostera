@@ -345,7 +345,7 @@ let error t ~now buf hdr =
           let rproto = proto
           and eport = Bytes.get_uint16_be buf l4
           and from = dst
-          and fport = Bytes.get_uint16_be buf (l4 * 2) in
+          and fport = Bytes.get_uint16_be buf (l4 + 2) in
           Some { rproto; eport; from; fport }
         else if proto = _ICMP && Bytes.get_uint8 buf l4 = 8
         then
