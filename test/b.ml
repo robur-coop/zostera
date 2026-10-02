@@ -54,7 +54,7 @@ let run ?(lose = fun _src _pkt -> false) ~now nodes src actions =
                     ~from:src.addr pkt with
             | Ok actions -> go node actions
             | Error err -> Test.failwithf "%a" Zostera.pp_error err end
-      | `Deliver (_, data) -> delivered := (src.addr, data) :: !delivered
+      | `Deliver (_, buf, len) -> delivered := (src.addr, Bytes.sub_string buf 0 len) :: !delivered
       | `Drop (_, data) -> dropped := data :: !dropped
       | `Error err -> Test.failwithf "%a" Zostera.pp_error err in
     List.iter fn actions in
