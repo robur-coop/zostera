@@ -1,4 +1,7 @@
 let ( let* ) = Result.bind
+let src = Logs.Src.create "zostera.outer"
+
+module Log = (val Logs.src_log src : Logs.LOG)
 
 type t =
   { ethd : Ethernet.daemon
@@ -35,3 +38,56 @@ let device ~name ?gateway cidr =
     ARPv4.kill t.arpd;
     Ethernet.kill t.ethd in
   Mkernel.(map fn [ net name ]) |> Mkernel.finally finally
+
+let pseudo_hdr ~src ~dst ~len =
+  let src = Int32.to_int (Ipaddr.V4.to_int32 src) land 0xffffffff in
+  let dst = Int32.to_int (Ipaddr.V4.to_int32 dst) land 0xffffffff in
+  (src lsr 16) + (src land 0xffff) + (dst lsr 16) + (dst land 0xffff) + 17 + len
+
+let write_on_bstr ~src ~dst ~src_port ~dst_port pkt bstr =
+  let len = String.length pkt in
+  Bstr.set_uint16_be bstr 0 src_port;
+  Bstr.set_uint16_be bstr 2 dst_port;
+  Bstr.set_uint16_be bstr 4 (len + 8);
+  Bstr.set_uint16_be bstr 6 0;
+  Bstr.blit_from_string pkt ~src_off:0 bstr ~dst_off:8 ~len;
+  let chk = lnot (Utcp.Checksum.digest ~off:0 ~len:(len + 8) bstr) land 0xffff in
+  let chk = pseudo_hdr ~src ~dst ~len:(len + 8) + chk in
+  let chk = (chk land 0xffff) + (chk lsr 16) in
+  let chk = (chk land 0xffff) + (chk lsr 16) in
+  let chk = lnot chk land 0xffff in
+  Bstr.set_uint16_be bstr 6 (if chk = 0 then 0xffff else chk)
+
+let to_string ~src ~dst ~src_port ~dst_port pkt =
+  let len = String.length pkt in
+  let buf = Bytes.create (len + 8) in
+  Bytes.set_uint16_be buf 0 src_port;
+  Bytes.set_uint16_be buf 2 dst_port;
+  Bytes.set_uint16_be buf 4 (len + 8);
+  Bytes.set_uint16_be buf 6 0;
+  Bytes.blit_string pkt 0 buf 8 len;
+  let chk = lnot (Utcp.Checksum.digest_string ~off:0 ~len:(len + 8) (Bytes.unsafe_to_string buf)) land 0xffff in
+  let chk = pseudo_hdr ~src ~dst ~len:(len + 8) + chk in
+  let chk = (chk land 0xffff) + (chk lsr 16) in
+  let chk = (chk land 0xffff) + (chk lsr 16) in
+  let chk = lnot chk land 0xffff in
+  Bytes.set_uint16_be buf 6 (if chk = 0 then 0xffff else chk);
+  Bytes.unsafe_to_string buf
+
+let send outer ~src_port (dst : Zostera.Addr.t) ~ds pkt =
+  match dst.ipaddr with
+  | Ipaddr.V6 _ ->
+    Log.warn (fun m -> m "IPv6 endpoints are not supported (%a)" Ipaddr.pp dst.ipaddr)
+  | Ipaddr.V4 ipv4 ->
+    let src = IPv4.src outer.ipv4 ~dst:ipv4 in
+    let len = 8 + String.length pkt in
+    let fn = write_on_bstr ~src ~dst:ipv4 ~src_port ~dst_port:dst.port pkt in
+    let w =
+      if 20 + len <= outer.mtu then IPv4.Writer.into outer.ipv4 ~len fn
+      else
+        let str = to_string ~src ~dst:ipv4 ~src_port ~dst_port:dst.port pkt in
+        IPv4.Writer.of_string outer.ipv4 str in
+    match IPv4.write outer.ipv4 ~tos:ds ~src ipv4 ~protocol:17 w with
+    | Ok () -> ()
+    | Error `Route_not_found ->
+      Log.warn (fun m -> m "No route to %a" Ipaddr.V4.pp ipv4)

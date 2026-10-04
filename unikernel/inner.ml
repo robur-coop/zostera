@@ -1,4 +1,7 @@
 let ( let* ) = Result.bind
+let src = Logs.Src.create "zostera.inner"
+
+module Log = (val Logs.src_log src : Logs.LOG)
 
 type t =
   { ethd : Ethernet.daemon
@@ -26,4 +29,37 @@ let device ~name cidr =
     Ethernet.kill t.ethd in
   Mkernel.(map fn [ net name ]) |> Mkernel.finally finally
 
+let send inner dst buf =
+  let mtu = Ethernet.mtu inner.eth in
+  let df = Bytes.get_uint16_be buf 6 land 0x4000 <> 0 in
+  if Bytes.length buf > mtu && df
+  then Log.warn (fun m -> m "Packet too bug for %a (%d byte(s))" Ipaddr.V4.pp dst (Bytes.length buf))
+  else
+    let mac = match ARPv4.ask inner.arp dst with
+      | Some mac -> Ok mac
+      | None -> ARPv4.query inner.arp dst in
+    match mac with
+    | Ok mac ->
+      let send buf =
+        let len = Bytes.length buf in
+        let fn bstr = Bstr.blit_from_bytes buf ~src_off:0 bstr ~dst_off:0 ~len; len in
+        Ethernet.write_directly_into inner.eth ~len:(14 + len) ~dst:mac ~protocol:Ethernet.IPv4 fn in
+      List.iter send (Nat.fragment buf ~mtu)
+    | Error err ->
+      Log.warn (fun m -> m "Impossible to reach %a: %a" Ipaddr.V4.pp dst ARPv4.pp_error err)
 
+let deliver inner nat ~allowed ~now buf len =
+  match Nat.decode (Bytes.unsafe_to_string buf) with
+  | Error _ -> Log.debug (fun m -> m "Invalid packet from the tunnel")
+  | Ok hdr when hdr.Nat.len > len -> Log.warn (fun m -> m "Dishonest packet size from the tunnel")
+  | Ok hdr when not (allowed hdr.Nat.src) -> Log.warn (fun m -> m "Packet from %a is not allowed by the peer" Ipaddr.V4.pp hdr.Nat.src)
+  | Ok hdr ->
+    let send (dst, buf) =
+      if Ipaddr.V4.Prefix.mem dst inner.cidr
+      then send inner dst buf
+      else Log.warn (fun m -> m "%a is not on the private network" Ipaddr.V4.pp dst) in
+    let pkt = Bytes.sub buf 0 hdr.Nat.len in
+    match Nat.inbound nat ~hdr ~now pkt with
+    | Ok pkts -> List.iter send pkts
+    | Error err ->
+      Log.debug (fun m -> m "Drop a packet from %a: %a" Ipaddr.V4.pp hdr.Nat.src Nat.pp_error err)

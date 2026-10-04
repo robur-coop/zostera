@@ -1,6 +1,6 @@
 (executable
  (name wg)
- (modules wg outer inner)
+ (modules wg wg_cli outer inner)
  (public_name wg)
  (modes native)
  (link_flags :standard -cclib "-z solo5-abi=hvt")
@@ -41,4 +41,11 @@
  (action
   (with-stdout-to
    manifest.wg.json
-   (run %{exe:wg.exe} --ipv4=0.0.0.0/24 --private-ipv4=0.0.0.0/24))))
+   (run
+    %{exe:wg.exe}
+    --ipv4=0.0.0.0/24
+    --private-ipv4=0.0.0.0/24
+    --address=0.0.0.0
+    --endpoint=0.0.0.0:51820
+    --private-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    --peer-public-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=))))

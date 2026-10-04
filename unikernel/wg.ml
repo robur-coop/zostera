@@ -5,12 +5,168 @@ let rng =
   let finally = Mirage_crypto_rng_mkernel.kill in
   Mkernel.map fn Mkernel.[] |> Mkernel.finally finally
 
-let run _quiet (cidr4, gateway4) private_cidr _metrics =
+let checksum buf ~off ~len =
+  let sum = ref 0 in
+  for i = 0 to len - 1 do
+    let v = Bytes.get_uint8 buf (off + i) in
+    sum := !sum + if i land 1 = 0 then v lsl 8 else v
+  done;
+  while !sum > 0xffff do sum := (!sum land 0xffff) + (!sum lsr 16) done;
+  lnot !sum land 0xffff
+
+let too_big buf ~src ~mtu =
+  let ihl = (Bytes.get_uint8 buf 0 land 0x0f) * 4 in
+  let quoted = Int.min (Bytes.get_uint16_be buf 2) (ihl + 8) in
+  let len = 20 + 8 + quoted in
+  let pkt = Bytes.make len '\000' in
+  Bytes.set_uint8 pkt 0 0x45;
+  Bytes.set_uint16_be pkt 2 len;
+  Bytes.set_uint8 pkt 8 64;
+  Bytes.set_uint8 pkt 9 1;
+  Bytes.set_int32_be pkt 12 (Ipaddr.V4.to_int32 src);
+  Bytes.blit buf 12 pkt 16 4;
+  Bytes.set_uint8 pkt 20 3;
+  Bytes.set_uint8 pkt 21 4;
+  Bytes.set_uint16_be pkt 26 mtu;
+  Bytes.blit buf 0 pkt 28 quoted;
+  Bytes.set_uint16_be pkt 22 (checksum pkt ~off:20 ~len:(8 + quoted));
+  Bytes.set_uint16_be pkt 10 (checksum pkt ~off:0 ~len:20);
+  pkt
+
+module Events = struct
+  type t =
+    { queue : event Queue.t
+    ; mutable waiter : unit Miou.Computation.t option }
+  and event =
+    [ `Out of Zostera.Addr.t * int * string
+    | `In of string 
+    | `Tick ]
+
+  let create () = { queue= Queue.create (); waiter= None }
+  let length t = Queue.length t.queue
+  let _MAX_EVENTS = 1014
+
+  let push t ev =
+    if Queue.length t.queue < _MAX_EVENTS
+    then Queue.push ev t.queue
+    else Logs.warn (fun m -> m "Too many events, drop one");
+    match t.waiter with
+    | None -> ()
+    | Some computation ->
+      t.waiter <- None;
+      ignore (Miou.Computation.try_return computation ())
+
+  let rec pop t =
+    match Queue.take_opt t.queue with
+    | Some ev -> ev
+    | None ->
+      let computation = Miou.Computation.create () in
+      t.waiter <- Some computation;
+      Miou.Computation.await_exn computation;
+      pop t
+end
+
+let events = Events.create ()
+
+type state =
+  { cfg : Wg_cli.cfg
+  ; bruit : Bruit.t
+  ; nat : Nat.t
+  ; outer : Outer.t
+  ; inner : Inner.t
+  ; rx : bytes
+  ; mutable last_expire : int }
+
+let allowed cfg ipaddr = List.exists (Ipaddr.V4.Prefix.mem ipaddr) cfg.Wg_cli.allowed
+
+let run state ~now actions =
+  let fn = function
+    | `Send (dst, ds, pkt) ->
+      Outer.send state.outer ~src_port:state.cfg.port dst ~ds pkt
+    | `Deliver (_, buf, len) ->
+      let allowed = allowed state.cfg in
+      Inner.deliver state.inner state.nat ~allowed ~now buf len
+    | `Drop _ -> Logs.debug (fun m -> m "A staged packet was dropped")
+    | `Error err -> Logs.warn (fun m -> m "%a" Zostera.pp_error err) in
+  List.iter fn actions
+
+let forward state ~timestamp ~now data =
+  let buf = Bytes.of_string data in
+  let gateway = Ipaddr.V4.Prefix.address state.inner.Inner.cidr in
+  match Nat.decode data with
+  | Error _ -> Logs.debug (fun m -> m "Invalid packet from the private network")
+  | Ok hdr when Ipaddr.V4.compare hdr.Nat.dst gateway = 0 -> ()
+  | Ok hdr when Ipaddr.V4.Prefix.mem hdr.Nat.dst state.inner.Inner.cidr -> ()
+  | Ok hdr when not (Ipaddr.V4.Prefix.mem hdr.Nat.src state.inner.cidr) ->
+    Logs.warn (fun m -> m "Spoofed source %a from the private network" Ipaddr.V4.pp hdr.Nat.src)
+  | Ok hdr when hdr.Nat.len > state.cfg.mtu && hdr.Nat.df ->
+    let pkt = too_big buf ~src:gateway ~mtu:state.cfg.mtu in
+    Inner.send state.inner hdr.Nat.src pkt
+  | Ok hdr ->
+    let mss = state.cfg.mtu - 40 in
+    match Nat.outbound state.nat ~hdr ~now ~mss buf with
+    | Error err ->
+      Logs.debug (fun m -> m "Drop a packet to %a: %a" Ipaddr.V4.pp hdr.Nat.dst Nat.pp_error err)
+    | Ok len ->
+      let write frag =
+        let data = Bytes.unsafe_to_string frag in
+        match Bruit.write state.bruit ~timestamp ~now state.cfg.peer data with
+        | Ok actions -> run state ~now actions
+        | Error err -> Logs.warn (fun m -> m "%a" Zostera.pp_error err) in
+      List.iter write (Nat.fragment (Bytes.sub buf 0 len) ~mtu:state.cfg.mtu)
+
+let _1ms = 1_000_000
+
+let rec go state =
+  let ev = Events.pop events in
+  let timestamp = Mkernel.clock_wall () in
+  let now = Mkernel.clock_monotonic () in
+  begin match ev with
+  | `Out (from, ds, pkt) ->
+    let pending = Events.length events in
+    begin match Bruit.packet state.bruit ~timestamp ~now ~pending ~ds ~buf:state.rx ~from pkt with
+    | Ok actions -> run state ~now actions
+    | Error err ->
+      Logs.debug (fun m -> m "Invalid WireGuard packet from: %a: %a"
+        Ipaddr.pp from.Zostera.Addr.ipaddr Zostera.pp_error err) end
+  | `In str -> forward state ~timestamp ~now str
+  | `Tick ->
+    run state ~now (Bruit.tick state.bruit ~timestamp ~now);
+    if now - state.last_expire > 10_000 * _1ms
+    then begin Nat.clean_up state.nat ~now; state.last_expire <- now end
+  end;
+  go state
+
+let rec clock bruit =
+  let now = Mkernel.clock_monotonic () in
+  let delay = match Bruit.deadline bruit with
+    | Some at -> at - now
+    | None -> 500 * _1ms in
+  Mkernel.sleep (Int.max (10 * _1ms) (Int.min delay (500 * _1ms)));
+  Events.push events `Tick;
+  clock bruit
+
+let run _quiet cfg (cidr4, gateway4) private_cidr _metrics =
   let outer = Outer.device ~name:"service" ?gateway:gateway4 cidr4 in
   let inner = Inner.device ~name:"private" private_cidr in
   Mkernel.(run [ rng; outer; inner; _metrics ])
-  @@ fun _rng _outer _inner _metrics () ->
-  assert false
+  @@ fun _rng outer inner _metrics () ->
+  let bruit = Bruit.create cfg.Wg_cli.identity in
+  let nat = Nat.create cfg.address in
+  let now = Mkernel.clock_monotonic () in
+  let timestamp = Mkernel.clock_wall () in
+  let rx = Bytes.create 0x10_000 in
+  let state = { cfg; bruit; nat; outer; inner; rx; last_expire= now } in
+  Logs.info (fun m -> m "Out public key: %s"
+    (Base64.encode_string (Zostera.octets_of_public (Zostera.public cfg.identity))));
+  begin match Bruit.add ?psk:cfg.psk ~edn:cfg.edn ?persistent_keepalive:cfg.keepalive
+    bruit ~timestamp ~now cfg.peer with
+  | Ok actions -> run state ~now actions
+  | Error err -> Fmt.failwith "Impossible to add the peer: %a" Zostera.pp_error err end;
+  let clock = Miou.async @@ fun () -> clock bruit in
+  let finally () = Miou.cancel clock in
+  Fun.protect ~finally @@ fun () ->
+  go state
 
 open Cmdliner
 
@@ -90,6 +246,7 @@ let term =
   let open Term in
   const run
   $ Mnet_cli.setup_logs
+  $ Wg_cli.setup
   $ setup_service
   $ private_ipv4
   $ setup_metrics
