@@ -44,7 +44,7 @@ let send inner dst buf =
       let send buf =
         let len = Bytes.length buf in
         let fn bstr = Bstr.blit_from_bytes buf ~src_off:0 bstr ~dst_off:0 ~len; len in
-        Ethernet.write_directly_into inner.eth ~len:(14 + len) ~dst:mac ~protocol:Ethernet.IPv4 fn in
+        Ethernet.write_directly_into inner.eth ~len ~dst:mac ~protocol:Ethernet.IPv4 fn in
       List.iter send (Nat.fragment buf ~mtu)
     | Error err ->
       Log.warn (fun m -> m "Impossible to reach %a: %a" Ipaddr.V4.pp dst ARPv4.pp_error err)
