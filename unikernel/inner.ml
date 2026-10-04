@@ -10,7 +10,7 @@ type t =
   ; arp : ARPv4.t
   ; cidr : Ipaddr.V4.Prefix.t }
 
-let device ~name cidr =
+let device ~name ~handler:fn cidr =
   let fn net () =
     let mac = Macaddr.of_octets_exn (Mkernel.Net.mac net :> string) in
     let connect () =
@@ -18,7 +18,8 @@ let device ~name cidr =
       let* arpd, arp = ARPv4.create ~ipaddr:(Ipaddr.V4.Prefix.address cidr) eth in
       let handler pkt = match pkt.Ethernet.protocol with
         | Ethernet.ARPv4 -> ARPv4.transfer arp pkt
-        | Ethernet.IPv4 | Ethernet.IPv6 -> () in
+        | Ethernet.IPv4 -> fn (Slice_bstr.to_string pkt.Ethernet.payload)
+        | Ethernet.IPv6 -> () in
       Ethernet.set_handler eth handler;
       Ok { ethd; arpd; eth; arp; cidr } in
     match connect () with

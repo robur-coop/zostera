@@ -10,12 +10,26 @@ type t =
   ; ipv4 : IPv4.t
   ; mtu : int }
 
-let handler icmpd ((hdr, _payload) as pkt) =
+let udp ~port fn hdr payload =
+  let str = match payload with
+    | IPv4.Slice slice -> Slice_bstr.to_string slice
+    | IPv4.String str -> str in
+  let len = String.length str in
+  if len >= 8 then
+    let src_port = String.get_uint16_be str 0 in
+    let dst_port = String.get_uint16_be str 2 in
+    let len0 = String.get_uint16_be str 4 in
+    if dst_port = port && len0 >= 8 && len0 <= len then
+      let from = { Zostera.Addr.ipaddr= Ipaddr.V4 hdr.IPv4.src; port= src_port } in
+      fn from hdr.IPv4.tos (String.sub str 8 (len0 - 8))
+
+let handler icmpd ~port fn ((hdr, payload) as pkt) =
   match hdr.IPv4.protocol with
   | 1 -> ICMPv4.transfer icmpd pkt (* NOTE(dinosaure): we can ping! *)
+  | 17 -> udp ~port fn hdr payload
   | _ -> ()
 
-let device ~name ?gateway cidr =
+let device ~name ?gateway ~port ~handler:fn cidr =
   let fn net () =
     let mac = Macaddr.of_octets_exn (Mkernel.Net.mac net :> string) in
     let fn () =
@@ -23,7 +37,7 @@ let device ~name ?gateway cidr =
       let* arpd, arp = ARPv4.create ~ipaddr:(Ipaddr.V4.Prefix.address cidr) eth in
       let* ipv4 = IPv4.create eth arp ?gateway ~cidr () in
       let icmpd = ICMPv4.handler ipv4 in
-      IPv4.set_handler ipv4 (handler icmpd);
+      IPv4.set_handler ipv4 (handler icmpd ~port fn);
       let handler pkt = match pkt.Ethernet.protocol with
         | Ethernet.ARPv4 -> ARPv4.transfer arp pkt
         | Ethernet.IPv4 -> IPv4.input ipv4 pkt

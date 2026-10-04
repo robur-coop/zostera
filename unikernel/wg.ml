@@ -147,8 +147,11 @@ let rec clock bruit =
   clock bruit
 
 let run _quiet cfg (cidr4, gateway4) private_cidr _metrics =
-  let outer = Outer.device ~name:"service" ?gateway:gateway4 cidr4 in
-  let inner = Inner.device ~name:"private" private_cidr in
+  let on_udp from ds pkt = Events.push events (`Out (from, ds, pkt)) in
+  let on_ipv4 pkt = Events.push events (`In pkt) in
+  let outer = Outer.device ~name:"service" ?gateway:gateway4 ~port:cfg.Wg_cli.port
+    ~handler:on_udp cidr4 in
+  let inner = Inner.device ~name:"private" ~handler:on_ipv4 private_cidr in
   Mkernel.(run [ rng; outer; inner; _metrics ])
   @@ fun _rng outer inner _metrics () ->
   let bruit = Bruit.create cfg.Wg_cli.identity in
