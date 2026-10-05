@@ -23,7 +23,7 @@ type ipv4_hdr =
   ; src : Ipaddr.V4.t
   ; dst : Ipaddr.V4.t }
 
-val decode : string -> (ipv4_hdr, [> error ]) result
-val inbound : t -> now:int -> ?hdr:ipv4_hdr -> bytes -> ((Ipaddr.V4.t * bytes) list, [> error ]) result
+val decode : ?off:int -> string -> (ipv4_hdr, [> error ]) result
+val inbound : t -> now:int -> ?hdr:ipv4_hdr -> bytes Slice.t -> ((Ipaddr.V4.t * bytes Slice.t) list, [> error ]) result
 val outbound : t -> now:int -> ?mss:int -> ?hdr:ipv4_hdr -> bytes -> (int, [> error ]) result
-val fragment : bytes -> mtu:int -> bytes list
+val fragment : bytes Slice.t -> mtu:int -> bytes Slice.t list
