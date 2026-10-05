@@ -654,9 +654,10 @@ let send_into ~now ({ remote; keys; birth; _ } as session) msg ?(dst_off= 0) pkt
   let len = String.length msg in
   let pad = (_PADDING - (len mod _PADDING)) land (_PADDING - 1) in
   (* TODO(dinosaure): don't overflow the MTU *)
-  let tmp = Bytes.make (len + pad) '\000' in
-  Bytes.blit_string msg 0 tmp 0 len;
-  let tmp = Bytes.unsafe_to_string tmp in
+  let tmp = if pad = 0 then msg else begin
+    let tmp = Bytes.make (len + pad) '\000' in
+    Bytes.blit_string msg 0 tmp 0 len;
+    Bytes.unsafe_to_string tmp end in
   encrypt_data_into ~key:keys.send ~counter ~dst_off:(dst_off + 16) tmp pkt;
   Bytes.set_uint8 pkt (dst_off + 0) 4;
   Bytes.set_int32_le pkt (dst_off + 4) (remote :> int32);
