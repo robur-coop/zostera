@@ -2,6 +2,7 @@ let ( let* ) = Result.bind
 let src = Logs.Src.create "zostera.outer"
 
 module Log = (val Logs.src_log src : Logs.LOG)
+module SBstr = Slice_bstr
 
 type t =
   { ethd : Ethernet.daemon
@@ -10,18 +11,29 @@ type t =
   ; ipv4 : IPv4.t
   ; mtu : int }
 
-let udp ~port fn hdr payload =
-  let str = match payload with
-    | IPv4.Slice slice -> Slice_bstr.to_string slice
-    | IPv4.String str -> str in
-  let len = String.length str in
-  if len >= 8 then
-    let src_port = String.get_uint16_be str 0 in
-    let dst_port = String.get_uint16_be str 2 in
-    let len0 = String.get_uint16_be str 4 in
-    if dst_port = port && len0 >= 8 && len0 <= len then
-      let from = { Zostera.Addr.ipaddr= Ipaddr.V4 hdr.IPv4.src; port= src_port } in
-      fn from hdr.IPv4.tos (String.sub str 8 (len0 - 8))
+let udp ~port fn hdr = function
+  | IPv4.Slice slice ->
+    let len = SBstr.length slice in
+    if len >= 8 then
+      let src_port = SBstr.get_uint16_be slice 0 in
+      let dst_port = SBstr.get_uint16_be slice 2 in
+      let len0 = SBstr.get_uint16_be slice 4 in
+      if dst_port = port && len0 >= 8 && len0 <= len
+      then
+        let from = { Zostera.Addr.ipaddr= Ipaddr.V4 hdr.IPv4.src; port= src_port } in
+        let str = SBstr.sub_string slice ~off:8 ~len:(len0 - 8) in
+        fn from hdr.IPv4.tos str
+  | IPv4.String str ->
+    let len = String.length str in
+    if len >= 8 then
+      let src_port = String.get_uint16_be str 0 in
+      let dst_port = String.get_uint16_be str 2 in
+      let len0 = String.get_uint16_be str 4 in
+      if dst_port = port && len0 >= 8 && len0 <= len
+      then
+        let from = { Zostera.Addr.ipaddr= Ipaddr.V4 hdr.IPv4.src; port= src_port } in
+        let str = String.sub str 8 (len0 - 8) in
+        fn from hdr.IPv4.tos str
 
 let handler icmpd ~port fn ((hdr, payload) as pkt) =
   match hdr.IPv4.protocol with
