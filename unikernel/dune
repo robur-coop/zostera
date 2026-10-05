@@ -1,10 +1,33 @@
+(library
+ (name outer)
+ (public_name zostera.outer)
+ (modules outer)
+ (libraries zostera mnet logs slice.bytes))
+
+(library
+ (name inner)
+ (public_name zostera.inner)
+ (modules inner)
+ (libraries zostera.nat mnet logs slice.bytes))
+
 (executable
  (name wg)
- (modules wg wg_cli outer inner)
+ (modules wg wg_cli)
  (public_name wg)
  (modes native)
  (link_flags :standard -cclib "-z solo5-abi=hvt")
- (libraries cmdliner zostera zostera.nat zostera.bruit mkernel mirage-crypto-rng-mkernel mnet mnet-cli tally-mnet slice.bytes)
+ (libraries
+  cmdliner
+  zostera
+  zostera.nat
+  zostera.bruit
+  zostera.inner
+  zostera.outer
+  mkernel
+  mirage-crypto-rng-mkernel
+  mnet
+  mnet-cli
+  tally-mnet)
  (foreign_stubs
   (language c)
   (names manifest.wg)))
@@ -39,3 +62,51 @@
     --endpoint=0.0.0.0:51820
     --private-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
     --peer-public-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=))))
+
+(executable
+ (name wgd)
+ (modules wgd wgd_cli)
+ (public_name wgd)
+ (modes native)
+ (link_flags :standard -cclib "-z solo5-abi=hvt")
+ (libraries
+  cmdliner
+  zostera
+  zostera.inner
+  zostera.outer
+  zostera.bruit
+  mirage-crypto-rng-mkernel
+  mnet
+  mnet-cli
+  tally-mnet)
+ (foreign_stubs
+  (language c)
+  (names manifest.wgd)))
+
+(rule
+ (targets manifest.wgd.c)
+ (enabled_if
+  (= %{context_name} "default"))
+ (action
+  (write-file manifest.wgd.c "")))
+
+(rule
+ (targets manifest.wgd.c)
+ (deps manifest.wgd.json)
+ (enabled_if
+  (= %{context_name} "solo5"))
+ (action
+  (run solo5-elftool gen-manifest manifest.wgd.json manifest.wgd.c)))
+
+(rule
+ (targets manifest.wgd.json)
+ (enabled_if
+  (= %{context_name} "solo5"))
+ (action
+  (with-stdout-to
+   manifest.wgd.json
+   (run
+    %{exe:wgd.exe}
+    --ipv4=0.0.0.0/24
+    --private-ipv4=0.0.0.0/24
+    --private-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=))))
