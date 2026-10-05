@@ -4,17 +4,7 @@
  (public_name wg)
  (modes native)
  (link_flags :standard -cclib "-z solo5-abi=hvt")
- (libraries
-  mkernel
-  mirage-crypto-rng-mkernel
-  tally-mnet
-  zostera
-  zostera.bruit
-  zostera.nat
-  base64
-  utcp
-  mnet
-  mnet-cli)
+ (libraries cmdliner zostera zostera.nat zostera.bruit mkernel mirage-crypto-rng-mkernel mnet mnet-cli tally-mnet slice.bytes)
  (foreign_stubs
   (language c)
   (names manifest.wg)))
