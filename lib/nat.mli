@@ -25,5 +25,5 @@ type ipv4_hdr =
 
 val decode : ?off:int -> string -> (ipv4_hdr, [> error ]) result
 val inbound : t -> now:int -> ?hdr:ipv4_hdr -> bytes Slice.t -> ((Ipaddr.V4.t * bytes Slice.t) list, [> error ]) result
-val outbound : t -> now:int -> ?mss:int -> ?hdr:ipv4_hdr -> bytes -> (int, [> error ]) result
+val outbound : t -> now:int -> ?mss:int -> ?hdr:ipv4_hdr -> bytes Slice.t -> (int, [> error ]) result
 val fragment : bytes Slice.t -> mtu:int -> bytes Slice.t list

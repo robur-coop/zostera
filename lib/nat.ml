@@ -253,20 +253,23 @@ let clamp slice ~off ~len ~mss =
     go (off + 20)
 
 (* from our private network to Internet *)
-let outbound t ~now ?mss ?hdr (buf : bytes) =
+let outbound t ~now ?mss ?hdr slice =
   let* hdr, slice = match hdr with
     | Some hdr ->
       (* NOTE(dinosaure): [decr] has a side-effect. *)
-      let* len = if Bytes.length buf < hdr.len then error_msgf "Truncated IPv4 packet"
+      let* len = if SBytes.length slice < hdr.len
+        then error_msgf "Truncated IPv4 packet"
         else Ok hdr.len in
-      let slice = SBytes.make ~off:0 ~len buf in
+      let slice = SBytes.sub ~off:0 ~len slice in
       if not (decr slice) then err_ttl_exceeded
       else Ok (hdr, slice)
     | None ->
-      let* hdr = decode (Bytes.unsafe_to_string buf) in
-      let* len = if Bytes.length buf < hdr.len then error_msgf "Truncated IPv4 packet"
+      let { Slice.buf; off; _ } = slice in
+      let* hdr = decode ~off (Bytes.unsafe_to_string buf) in
+      let* len = if SBytes.length slice < hdr.len
+        then error_msgf "Truncated IPv4 packet"
         else Ok hdr.len in
-      let slice = SBytes.make ~off:0 ~len buf in
+      let slice = SBytes.sub ~off:0 ~len slice in
       if not (decr slice) then err_ttl_exceeded
       else Ok (hdr, slice) in
   match hdr with
