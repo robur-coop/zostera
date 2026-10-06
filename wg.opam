@@ -29,4 +29,5 @@ pin-depends: [
   [ "zarith.dev" "git+https://github.com/mirage/Zarith.git#df8969d9bb95cffca13e31a615189ab27ada0684" ]
   [ "mnet.dev" "git+https://github.com/robur-coop/mnet.git#c85e0ab53ec8b48b74e7cd977e4701cb9380a8dc" ]
   [ "mnet-cli.dev" "git+https://github.com/robur-coop/mnet.git#c85e0ab53ec8b48b74e7cd977e4701cb9380a8dc" ]
+  [ "mnet-dhcp.dev" "git+https://github.com/robur-coop/mnet.git#c85e0ab53ec8b48b74e7cd977e4701cb9380a8dc" ]
 ]
