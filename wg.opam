@@ -1,0 +1,29 @@
+opam-version: "2.0"
+name:         "wg"
+maintainer:   "Romain Calascibetta <romain.calascibetta@gmail.com>"
+authors:      "Romain Calascibetta <romain.calascibetta@gmail.com>"
+homepage:     "https://github.com/robur-coop/zostera"
+bug-reports:  "https://github.com/robur-coop/zostera/issues"
+dev-repo:     "git+https://github.com/robur-coop/zostera.git"
+doc:          "https://robur-coop.github.io/zostera/"
+license:      "AGPL-3.0-or-later"
+synopsis:     "WireGuard unikernels"
+
+depends: [
+  "ocaml" {>= "4.08.0"}
+  "dune" {>= "2.9.0" & build}
+  "unic" {build}
+  "mfetch" {build}
+  "zostera" {= version}
+]
+build: [ [ make "all" ] ]
+x-maintenance-intent: [ "(latest)" ]
+x-mkernel-pre-build: [
+  ["mfetch" "fetch" "--with-dune-file" "--file=_mfetch"]
+  ["mfetch" "lock" "--file=_mfetch" "--output=_mfetch.locked"]
+]
+pin-depends: [
+  [ "zarith.dev" "git+https://github.com/mirage/Zarith.git#df8969d9bb95cffca13e31a615189ab27ada0684" ]
+  [ "mnet.dev" "git+https://github.com/robur-coop/mnet.git#c85e0ab53ec8b48b74e7cd977e4701cb9380a8dc" ]
+  [ "mnet-cli.dev" "git+https://github.com/robur-coop/mnet.git#c85e0ab53ec8b48b74e7cd977e4701cb9380a8dc" ]
+]

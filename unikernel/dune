@@ -1,18 +1,18 @@
 (library
  (name outer)
- (public_name zostera.outer)
+ (public_name wg.outer)
  (modules outer)
  (libraries zostera mnet logs slice.bytes))
 
 (library
  (name inner)
- (public_name zostera.inner)
+ (public_name wg.inner)
  (modules inner)
  (libraries zostera.nat mnet logs slice.bytes))
 
 (library
  (name caravan)
- (public_name zostera.caravan)
+ (public_name wg.caravan)
  (modules caravan)
  (foreign_stubs
   (language c)
@@ -22,16 +22,17 @@
  (name wg)
  (modules wg wg_cli)
  (public_name wg)
+ (package wg)
  (modes native)
  (link_flags :standard -cclib "-z solo5-abi=hvt")
  (libraries
   cmdliner
-  zostera.caravan
+  wg.caravan
   zostera
   zostera.nat
   zostera.bruit
-  zostera.inner
-  zostera.outer
+  wg.inner
+  wg.outer
   mkernel
   mirage-crypto-rng-mkernel
   mnet
@@ -76,14 +77,15 @@
  (name wgd)
  (modules wgd wgd_cli)
  (public_name wgd)
+ (package wg)
  (modes native)
  (link_flags :standard -cclib "-z solo5-abi=hvt")
  (libraries
   cmdliner
-  zostera.caravan
+  wg.caravan
   zostera
-  zostera.inner
-  zostera.outer
+  wg.inner
+  wg.outer
   zostera.bruit
   mirage-crypto-rng-mkernel
   mnet

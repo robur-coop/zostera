@@ -19,9 +19,11 @@
 (rule
  (alias runtest)
  (deps z.exe)
+ (package zostera)
  (action (run ./z.exe)))
 
 (rule
  (alias runtest)
  (deps b.exe)
+ (package zostera)
  (action (run ./b.exe)))

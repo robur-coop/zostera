@@ -6,15 +6,22 @@ homepage:     "https://github.com/robur-coop/zostera"
 bug-reports:  "https://github.com/robur-coop/zostera/issues"
 dev-repo:     "git+https://github.com/robur-coop/zostera.git"
 doc:          "https://robur-coop.github.io/zostera/"
-license:      "AGPL"
+license:      "AGPL-3.0-or-later"
 synopsis:     "WireGuard in OCaml"
 
 build: [ "dune" "build" "-p" name "-j" jobs ]
-run-test: [ "dune" "runtest" "-p" name "-j" jobs ] {os != "macos" & arch != "x86_32" & arch != "arm32"}
+run-test: [ "dune" "runtest" "-p" name "-j" jobs ]
 
 depends: [
-  "ocaml"         {>= "4.08.0"}
-  "dune"          {>= "2.9.0"}
+  "ocaml" {>= "4.08.0"}
+  "dune" {>= "2.9.0"}
+  "mirage-crypto-rng"
+  "mirage-crypto-ec"
+  "digestif"
+  "ohex"
+  "ipaddr"
+  "fmt"
+  "kdf"
 ]
 
 x-maintenance-intent: [ "(latest)" ]
