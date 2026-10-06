@@ -23,6 +23,7 @@ depends: [
   "fmt"
   "kdf"
   "slice"
+  "utcp"
 ]
 
 x-maintenance-intent: [ "(latest)" ]
