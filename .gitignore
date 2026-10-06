@@ -1,0 +1,14 @@
+_build
+_mfetch
+*.native
+*.byte
+*.so
+*.tar.gz
+_tests
+*.merlin
+*.install
+*.pack
+*.idx
+*.img
+*.hvt
+vendors/
