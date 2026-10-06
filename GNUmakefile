@@ -70,6 +70,6 @@ clean:
 	rm -f caravan.exe
 	rm -f wg.install
 
-install: wg.intall
+install: wg.install
 	@echo " INSTALL wg"
 	opam-installer wg.install
