@@ -1,4 +1,5 @@
 let msgf fmt = Fmt.kstr (fun msg -> `Msg msg) fmt
+let error_msgf fmt = Fmt.kstr (fun msg -> Error (`Msg msg)) fmt
 
 type cfg =
   { identity : Zostera.t
@@ -25,11 +26,21 @@ let key =
   Arg.conv (parser, pp)
 
 let private_key =
-  let doc = "Our private key (as $(b,wg genkey) generates)." in
+  let doc =
+    "Our private key (as $(b,wg genkey) generates). If it is not given, the \
+     key embedded into the image (with $(b,caravan)) is used."
+  in
   let open Arg in
-  required
+  value
   & opt (some key) None
   & info [ "private-key" ] ~doc ~docs:docs_wireguard ~docv:"KEY"
+
+let private_key_of = function
+  | Some secret -> Ok secret
+  | None ->
+    match Caravan.private_key () with
+    | Some secret -> Ok secret
+    | None -> error_msgf "A private key is required: use --private-key or embed it into the image"
 
 let peer_public_key =
   let doc = "The public key of the WireGuard server." in
@@ -100,6 +111,7 @@ let mtu =
 
 let setup secret peer psk edn keepalive port address allowed mtu =
   let ( let* ) = Result.bind in
+  let* secret = private_key_of secret in
   let* identity = Zostera.of_octets secret
     |> Result.map_error (fun err -> msgf "%a" Zostera.pp_error err) in
   let peer = Zostera.public_of_octets peer in
