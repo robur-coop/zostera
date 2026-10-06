@@ -215,6 +215,12 @@ type initiator = private [ `initiator ]
 type responder = private [ `responder ]
 (** The type of responders. *)
 
+type 'role role =
+  | Initiator : initiator role
+  | Responder : responder role
+
+(** {2 Handshake.} *)
+
 type pending
 (** The type of pending states:
     - for a {!type:handshake}: we are still waiting for a message from the peer
@@ -231,12 +237,8 @@ type confirmed
       {!val:send}, {!val:recv} and {!val:keepalive}. *)
 
 type ('role, 'state) handshake
-
-type 'role role =
-  | Initiator : initiator role
-  | Responder : responder role
-
-val uid_of_initiator : (initiator, pending) handshake -> Uid.t
+(** The type of handshakes. It keeps its role ({!type:initiator} or
+    {!type:responder}) and its state ({!type:pending} or {!type:confirmed}). *)
 
 type msg1
 (** Type of the first message that an {i initiator} should send to the
@@ -251,7 +253,15 @@ val step0 :
   -> ((initiator, pending) handshake * msg1, [> error ]) result
 (** [step0 ?g ~timestamp identity remote] generates a new handshake state and a
     {!type:msg1} that's the user can send to the {i responder}. Please refer to
-    {!section:clocks} to get more details about [timestamp] argument. *)
+    {!section:clocks} to get more details about [timestamp] argument. You can
+    specify a specific [uid] or let us to generate a new one with
+    [mirage-crypto-rng] and the possibly given [g] (in the case of you let us
+    to generate the unique ID, you can retrieve it with
+    {!val:uid_of_initiator}). *)
+
+val uid_of_initiator : (initiator, pending) handshake -> Uid.t
+(** [uid_of_initiator handshake] returns the {!type:Uid.t} chosen to identify
+    the {i initiator}. *)
 
 val msg1_to_string :
      now:int
@@ -299,7 +309,7 @@ val msg2_to_string :
   -> (responder, 'a) handshake
   -> msg2
   -> string
-(** [pkt_of_responder ~now state uid msg2] returns a WireGuard packet which
+(** [msg2_to_string ~now state msg2] returns a WireGuard packet which
     should be send to the {i initiator}. *)
 
 val msg2_of_string :
@@ -318,6 +328,8 @@ type ('a, 'state) session
 (** An established secure session (transport keys, counters and replay window). *)
 
 val role : ('role, 'state) session -> 'role role
+(** [role session] introspects our role from the given [session]. *)
+
 val uid_of_local : ('role, 'state) session -> Uid.t
 val uid_of_peer : ('role, 'state) session -> Uid.t
 
@@ -327,11 +339,19 @@ val step2 :
   -> t
   -> (initiator, pending) handshake
   -> ((initiator, confirmed) session, [> error ]) result
+(** [step2 ~now msg2 identity handshake] tries to finalize the given
+    [handshake] and generate a {!type:session} from it (which permits to
+    send/recv data throught an secured tunnel). *)
 
 val session_of_responder :
      now:int
   -> (responder, confirmed) handshake
   -> ((responder, pending) session, [> error ]) result
+(** [session_of_responder ~now handshake] returns a {i pending} session for the
+    responder from the given [handshake]. This session must be confirmed with
+    {!val:confirm}/{!val:confirm_into}. *)
+
+(** {2 WireGuard Tunnel.} *)
 
 type out =
   [ `Keepalive
@@ -356,6 +376,8 @@ val recv :
   -> ('role, confirmed) session
   -> string
   -> (out, [> error ]) result
+(** [recv ~now session pkt] tries to decrypt the incoming packet [pkt] and
+    extract its contents. *)
 
 val recv_into :
      now:int
@@ -378,21 +400,27 @@ val send :
   -> ('role, confirmed) session
   -> string
   -> (string, [> error ]) result
+(** [send ~now session data] generates a WireGuard packet and encrypt [data]
+    into it with the given [session]. *)
 
 val keepalive :
      now:int
   -> ('role, confirmed) session
   -> (string, [> error ]) result
+(** [keepalive ~now session] generates a {i keep-alive} packet from the given
+    [session]. *)
+
+(** {2 Expiration.} *)
 
 val expired : now:int -> ('role, 'state) session -> bool
 val rekey_on_send : now:int -> ('role, 'state) session -> bool
 val rekey_on_recv : now:int -> (initiator, 'state) session -> bool
 
+(**/*)
+
 type keys = { send : string; recv : string }
 
 val keys : ('role, 'state) session -> keys
-
-(**/*)
 
 val tai64n : now:int -> string
 (** See https://cr.yp.to/libtai/tai64.html.
