@@ -135,7 +135,7 @@ let rec go state =
   begin match ev with
   | `Out (from, ds, pkt) ->
     let pending = Events.length events in
-    begin match Bruit.packet state.bruit ~timestamp ~now ~pending ~ds ~buf:state.rx ~from pkt with
+    begin match Bruit.packet_into state.bruit ~timestamp ~now ~pending ~ds ~from pkt state.rx with
     | Ok actions -> run state ~now actions
     | Error err ->
       Logs.debug (fun m -> m "Invalid WireGuard packet from: %a: %a"

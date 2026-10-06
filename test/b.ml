@@ -52,7 +52,7 @@ let run ?(lose = fun _src _pkt -> false) ~now nodes src actions =
           | Some node ->
             match Bruit.packet node.bruit ~timestamp:(timestamp now) ~now
                     ~from:src.addr pkt with
-            | Ok actions -> go node actions
+            | Ok (actions, _) -> go node actions
             | Error err -> Test.failwithf "%a" Zostera.pp_error err end
       | `Deliver (_, buf, len) -> delivered := (src.addr, Bytes.sub_string buf 0 len) :: !delivered
       | `Drop (_, data) -> dropped := data :: !dropped
@@ -68,7 +68,7 @@ let write ?lose ~now nodes src dst data =
 
 let receive ~now ?pending ~from dst pkt =
   match Bruit.packet dst.bruit ~timestamp:(timestamp now) ~now ?pending ~from:from.addr pkt with
-  | Ok actions ->
+  | Ok (actions, _) ->
     let fn = function `Send (_, _, pkt) -> Some pkt | _ -> None in
     List.filter_map fn actions
   | Error err -> Test.failwithf "%a" Zostera.pp_error err

@@ -440,23 +440,11 @@ let rotate peer session =
     | None -> None in
   ({ peer with prev; curr= Some (Current session); next= None }, forget)
 
-(* NOTE(dinosaure): [buf] is a trick to use a pre-allocated buffer to decrypt
-   incoming packets directly to this buffer (and avoid an allocation). If the
-   given buffer is too small, we just ignore it and allocate a new one.
-
-   TODO(dinosaure): we probably should not propose such API and have something
-   like [packet_into] and raises [Invalid_argument] if the given buffer is too
-   small. But now, my head will explode. *)
-
-let buffer_for ?buf pkt =
-  let need = Int.max 0 (String.length pkt - 32) in
-  match buf with
-  | Some buf when Bytes.length buf >= need -> buf
-  | Some _ | None -> Bytes.create need
-
 (* [wg_packet_consume_data_done] *)
-let on_data t ~timestamp ~now ~ds ?buf ~from uid peer pkt =
-  let buf = buffer_for ?buf pkt in
+let on_data_into t ~timestamp ~now ~ds ~from uid peer pkt buf =
+  let* () = guard ~err:(msgf "Given buffer too small") @@ fun () ->
+    let need = Int.max 0 (String.length pkt - 32) in
+    Bytes.length buf >= need in
   let* peer, len, confirmed, r_events = match peer with
     | { next= Some next; _ } when Zostera.uid_of_local next = uid ->
       let* session, len = Zostera.confirm_into ~now next pkt buf in
@@ -496,7 +484,7 @@ let on_data t ~timestamp ~now ~ds ?buf ~from uid peer pkt =
     else (peer, r_events) in
   Ok (keep_key_fresh_on_recv t ~timestamp ~now peer r_events)
 
-let packet t ~timestamp ~now ?(pending = 0) ?(ds = 0) ?buf ~from pkt =
+let packet_into t ~timestamp ~now ?(pending = 0) ?(ds = 0) ~from pkt buf =
   let* k =
     let* () = guard ~err:(msgf "Truncated WireGuard packet") @@ fun () ->
       String.length pkt >= 4 in
@@ -513,8 +501,39 @@ let packet t ~timestamp ~now ?(pending = 0) ?(ds = 0) ?buf ~from pkt =
     let* peer, r_events = match k with
       | 2l -> on_msg2 t ~timestamp ~now ~load:(load ()) ~from uid peer pkt
       | 3l -> on_cookie ~now uid peer pkt
-      | _ -> on_data t ~timestamp ~now ~ds ?buf ~from uid peer pkt in
+      | _ -> on_data_into t ~timestamp ~now ~ds ~from uid peer pkt buf in
     Ok (apply t peer (List.rev r_events))
+  | _ -> error_msgf "Unknown packet type"
+
+let packet t ~timestamp ~now ?(pending = 0) ?(ds = 0) ~from pkt =
+  let* k =
+    let* () = guard ~err:(msgf "Truncated WireGuard packet") @@ fun () ->
+      String.length pkt >= 4 in
+    Ok (String.get_int32_le pkt 0) in
+  (* NOTE(dinosaure): as Linux, the load is only computed for [msg1] and
+     [msg2] (cookies are consumed before). *)
+  let load () = under_load t ~now ~pending in
+  match k with
+  | 1l ->
+    let* actions = on_msg1 t ~now ~load:(load ()) ~from pkt in
+    Ok (actions, None)
+  | 2l | 3l | 4l ->
+    let* uid = Uid.receiver pkt in
+    let* key = Option.to_result ~none:(msgf "Unknown receiver") (Hashtbl.find_opt t.index uid) in
+    let* peer = Option.to_result ~none:(msgf "Orphan unique ID") (Hashtbl.find_opt t.peers key) in
+    let* peer, r_events, data = match k with
+      | 2l ->
+        let* peer, r_events = on_msg2 t ~timestamp ~now ~load:(load ()) ~from uid peer pkt in
+        Ok (peer, r_events, None)
+      | 3l ->
+        let* peer, r_events = on_cookie ~now uid peer pkt in
+        Ok (peer, r_events, None)
+      | _ ->
+        let len = Int.max 0 (String.length pkt - 32) in
+        let buf = Bytes.create len in
+        let* peer, r_events = on_data_into t ~timestamp ~now ~ds ~from uid peer pkt buf in
+        Ok (peer, r_events, Some (Bytes.unsafe_to_string buf)) in
+    Ok (apply t peer (List.rev r_events), data)
   | _ -> error_msgf "Unknown packet type"
 
 (* [wg_xmit] *)

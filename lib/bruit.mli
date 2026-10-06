@@ -36,9 +36,19 @@ val packet :
   -> now:int
   -> ?pending:int
   -> ?ds:int
-  -> ?buf:bytes
   -> from:Zostera.Addr.t
   -> string
+  -> (action list * string option, [> error ]) result
+
+val packet_into :
+     t
+  -> timestamp:int
+  -> now:int
+  -> ?pending:int
+  -> ?ds:int
+  -> from:Zostera.Addr.t
+  -> string
+  -> bytes
   -> (action list, [> error ]) result
 
 val write :
