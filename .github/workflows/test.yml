@@ -1,0 +1,31 @@
+name: zostera & wg
+on: [push, pull_request]
+jobs:
+  tests:
+    name: Tests
+    strategy:
+      matrix:
+        ocaml-version: [5.5.0]
+        operating-system: [ubuntu-latest]
+    runs-on: ${{ matrix.operating-system }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Use OCaml ${{ matrix.ocaml-version }}
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml-version }}
+          opam-local-packages: |
+            *.opam
+      - name: Install dependencies
+        run: opam install --deps-only -t zostera
+      - name: Build
+        run: opam exec -- dune build -p zostera
+      - name: Test
+        run: opam exec -- dune runtest -p zostera
+      - name: Install unikernels
+        run: opam install wg --verbose-on=wg
+      - name: Check unikernels
+        run: |
+          file $(opam var bin)/wg.hvt
+          file $(opam var bin)/wgd.hvt
