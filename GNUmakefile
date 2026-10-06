@@ -10,18 +10,20 @@ vendors: _mfetch
 
 wgd.hvt.target: | vendors
 	@echo " BUILD unikernel/wgd.exe"
-	@dune build --root . --profile=release ./unikernel/wgd.exe
+	@dune build --root . --profile=release --workspace=dune-workspace.wg ./unikernel/wgd.exe
 	@echo " DESCR unikernel/wgd.exe"
 	@$(shell dune describe location \
 		--context solo5 --no-print-directory --root . --display=quiet \
+    --workspace=dune-workspace.wg \
 		./unikernel/wgd.exe 1> $@ 2>&1)
 
 wg.hvt.target: | vendors
 	@echo " BUILD unikernel/wg.exe"
-	@dune build --root . --profile=release ./unikernel/wg.exe
+	@dune build --root . --profile=release --workspace=dune-workspace.wg ./unikernel/wg.exe
 	@echo " DESCR unikernel/wg.exe"
 	@$(shell dune describe location \
 		--context solo5 --no-print-directory --root . --display=quiet \
+    --workspace=dune-workspace.wg \
 		./unikernel/wg.exe 1> $@ 2>&1)
 
 wgd.hvt: wgd.hvt.target
@@ -40,10 +42,11 @@ wg.hvt: wg.hvt.target
 
 caravan.exe.target: | vendors
 	@echo " BUILD bin/caravan.exe"
-	@dune build --root . --profile=release ./bin/caravan.exe
+	@dune build --root . --profile=release --workspace=dune-workspace.wg ./bin/caravan.exe
 	@echo " DESCR bin/caravan.exe"
 	@$(shell dune describe location \
 		--context default --no-print-directory --root . --display=quiet \
+    --workspace=dune-workspace.wg \
 		./bin/caravan.exe 1> $@ 2>&1)
 
 caravan.exe: caravan.exe.target
