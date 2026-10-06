@@ -15,6 +15,9 @@ depends: [
   "unic" {build}
   "mfetch" {build}
   "zostera" {= version}
+  "tally-mnet"
+  "mkernel"
+  "mirage-crypto-rng-mkernel"
 ]
 build: [ [ make "all" ] ]
 x-maintenance-intent: [ "(latest)" ]
