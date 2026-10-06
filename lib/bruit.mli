@@ -1,3 +1,8 @@
+(** Bruit is the implementation of WireGuard's state machine. Starting with an
+    identity, you can add or remove peers and communicate with them via
+    accurate sessions. This state machine updates the internal sessions for
+    peers according to their expiry times. *)
+
 type t
 type error = Zostera.error
 
