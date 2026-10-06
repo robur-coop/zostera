@@ -461,7 +461,10 @@ let frag t ~now hdr slice =
       | None -> [] in
     let frag = { birth= now; inside= Some inside; pending= []; size= 0 } in
     Hashtbl.replace t.frags fkey frag;
-    (* NOTE(dinosaure): ok, it's COMPLETELY unsafe but trust me here. *)
+    (* NOTE(dinosaure): ok, it's completely unsafe but trust me here. You can
+       see this line of code in relation with [next] and when we do a copy. So
+       it's kind of safe to transform given [string] to [bytes] without
+       allocations. *)
     let fn str = SBytes.make ~off:0 ~len:(String.length str) (Bytes.unsafe_of_string str) in
     let pending = List.map fn pending in
     let fn = rewrite_dst inside in
@@ -482,7 +485,10 @@ let next t ~now hdr slice =
     Hashtbl.remove t.frags fkey;
     error_msgf "Too many pending fragments"
   | Some frag ->
-    (* NOTE(dinosaure): [Bytes.to_string] is REALLY important here! *)
+    (* NOTE(dinosaure): [Bytes.to_string] is really important here! We have the
+       ownership on [slice] only until the end of the function. After that, the
+       given [slice] is re-used. If we would like to use it outside this
+       function (specially on [frag]), we must do a copy. *)
     frag.pending <- SBytes.to_string slice :: frag.pending;
     frag.size <- frag.size + hdr.len;
     Ok []
