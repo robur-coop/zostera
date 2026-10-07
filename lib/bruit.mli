@@ -1,7 +1,26 @@
 (** Bruit is the implementation of WireGuard's state machine. Starting with an
     identity, you can add or remove peers and communicate with them via
     accurate sessions. This state machine updates the internal sessions for
-    peers according to their expiry times. *)
+    peers according to their expiry times.
+
+    The user can both send ({!val:write}) and receive ({!val:packet}) content
+    (usually IP packets) from a peer that has been added (see {!val:add}). A
+    background task must execute the {!val:tick} function "simultaneously" in
+    order to perform {!type:actions} to maintain and/or terminate WireGuard
+    tunnels.
+
+    The {!type:action}s are:
+    - [`Deliver] corresponds to a {b decrypted} packet that must be sent to the
+      peer on the private network
+    - [`Send] corresponds to an {b encrypted} packet that must be sent over the
+      public network
+    - [`Drop] means that the state machine has deliberately ignored the given
+      packet (in order to limit memory usage)
+    - [`Error] indicates an error that occurred whilst sending or receiving
+      WireGuard packets
+
+    The state machine {!type:t} is {b not} domain-safe; that is to say, all
+    these functions must operate within the same domain. *)
 
 type t
 type error = Zostera.error
