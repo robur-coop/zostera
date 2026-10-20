@@ -55,32 +55,15 @@ module Addr = Addr
 module Limiter = Limiter
 module Window = Window
 module Uid = Uid
-
-(* NOTE(dinosaure): [B2s] gives to us the real access to the BLAKE2S implementation
-   just because [Digestif.Make_BLAKE2S] does not expose [Keyed]... *)
-module B2s = struct
-  type ctx = bytes
-
-  external ctx_size : unit -> int = "caml_digestif_blake2s_ctx_size" [@@noalloc]
-  external with_outlen_and_key : ctx -> int -> string -> int -> int -> unit
-    = "caml_digestif_blake2s_st_init_with_outlen_and_key" [@@noalloc]
-  external update : ctx -> string -> int -> int -> unit
-    = "caml_digestif_blake2s_st_update" [@@noalloc]
-  external finalize : ctx -> bytes -> int -> unit
-    = "caml_digestif_blake2s_st_finalize" [@@noalloc]
-end
+module B2s = Digestif.Make_BLAKE2S (struct let digest_size = 16 end)
 
 let _mac ~key ?(off= 0) ?len buf =
   if String.length key > 32 then invalid_arg "Zostera._mac: invalid key";
   let len = match len with Some len -> len | None -> String.length buf - off in
   if off < 0 || len < 0 || off + len > String.length buf
   then invalid_arg "Zostera._mac: out of bounds";
-  let ctx = Bytes.create (B2s.ctx_size ()) in
-  B2s.with_outlen_and_key ctx 16 key 0 (String.length key);
-  B2s.update ctx buf off len;
-  let result = Bytes.create 16 in
-  B2s.finalize ctx result 0;
-  Bytes.unsafe_to_string result
+  B2s.Keyed.mac_string ~key ~off ~len buf
+  |> B2s.to_raw_string
 
 type error =
   [ `Msg of string | `Invalid_cookie | Mirage_crypto_ec.error ]
