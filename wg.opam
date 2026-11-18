@@ -18,6 +18,9 @@ depends: [
   "tally-mnet"
   "mkernel"
   "mirage-crypto-rng-mkernel"
+  "mnet"
+  "mnet-dhcp"
+  "mnet-cli"
 ]
 build: [ [ make "all" ] ]
 x-maintenance-intent: [ "(latest)" ]
