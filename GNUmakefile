@@ -40,20 +40,7 @@ wg.hvt: wg.hvt.target
 	@echo " STRIP wg.hvt"
 	@strip $@
 
-caravan.exe.target: | vendors
-	@echo " BUILD bin/caravan.exe"
-	@dune build --root . --profile=release --workspace=dune-workspace.wg ./bin/caravan.exe
-	@echo " DESCR bin/caravan.exe"
-	@$(shell dune describe location \
-		--context default --no-print-directory --root . --display=quiet \
-    --workspace=dune-workspace.wg \
-		./bin/caravan.exe 1> $@ 2>&1)
-
-caravan.exe: caravan.exe.target
-	@echo " COPY caravan.exe"
-	@cp $(file < caravan.exe.target) $@
-
-wg.install: wgd.hvt wg.hvt caravan.exe
+wg.install: wgd.hvt wg.hvt
 	@echo " GEN wg.install"
 	@ocaml install.ml > $@
 
@@ -66,8 +53,6 @@ clean:
 	rm -f wgd.hvt
 	rm -f wg.hvt.target
 	rm -f wg.hvt
-	rm -f caravan.exe.target
-	rm -f caravan.exe
 	rm -f wg.install
 
 install: wg.install
