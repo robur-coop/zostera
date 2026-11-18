@@ -3,7 +3,6 @@ let install =
 bin: [
   "wgd.hvt"
   "wg.hvt"
-  "caravan.exe" {"caravan"}
 ]
 |text}
 
