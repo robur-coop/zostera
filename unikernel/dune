@@ -31,7 +31,6 @@
  (link_flags :standard -cclib "-z solo5-abi=hvt")
  (libraries
   cmdliner
-  caravan
   zostera
   zostera.nat
   zostera.bruit
@@ -87,7 +86,6 @@
  (link_flags :standard -cclib "-z solo5-abi=hvt")
  (libraries
   cmdliner
-  caravan
   zostera
   wg.inner
   wg.outer
