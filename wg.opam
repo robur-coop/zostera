@@ -21,6 +21,7 @@ depends: [
   "mnet"
   "mnet-dhcp"
   "mnet-cli"
+  "caravan"
 ]
 build: [ [ make "all" ] ]
 x-maintenance-intent: [ "(latest)" ]
