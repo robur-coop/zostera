@@ -38,7 +38,7 @@ let private_key =
 let private_key_of = function
   | Some secret -> Ok secret
   | None ->
-    match Caravan.private_key () with
+    match Pk.get () with
     | Some secret -> Ok secret
     | None -> error_msgf "A private key is required: use --private-key or embed it into the image"
 

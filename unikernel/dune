@@ -11,12 +11,16 @@
  (libraries zostera.nat mnet logs slice.bytes))
 
 (library
- (name caravan)
- (public_name wg.caravan)
- (modules caravan)
+ (name pk)
+ (public_name wg.pk)
+ (modules pk)
  (foreign_stubs
   (language c)
-  (names caravan)))
+  (names pk)))
+
+(rule
+ (targets pk.ml pk.c)
+ (action (run %{bin:caravan} generate pk 32)))
 
 (executable
  (name wg)
@@ -27,12 +31,13 @@
  (link_flags :standard -cclib "-z solo5-abi=hvt")
  (libraries
   cmdliner
-  wg.caravan
+  caravan
   zostera
   zostera.nat
   zostera.bruit
   wg.inner
   wg.outer
+  wg.pk
   mkernel
   mirage-crypto-rng-mkernel
   mnet
@@ -82,10 +87,11 @@
  (link_flags :standard -cclib "-z solo5-abi=hvt")
  (libraries
   cmdliner
-  wg.caravan
+  caravan
   zostera
   wg.inner
   wg.outer
+  wg.pk
   zostera.bruit
   mirage-crypto-rng-mkernel
   mnet

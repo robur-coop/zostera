@@ -4,11 +4,11 @@
 ;  (enabled_if
 ;   (= %{context_name} "default"))
 ;  (libraries mirage-crypto-rng.unix zostera))
-(executable
- (name caravan)
- (modules caravan)
- (public_name caravan)
- (package wg)
- (enabled_if
-  (= %{context_name} "default"))
- (libraries cmdliner fmt base64 unix))
+; (executable
+;  (name caravan)
+;  (modules caravan)
+;  (public_name caravan)
+;  (package wg)
+;  (enabled_if
+;   (= %{context_name} "default"))
+;  (libraries cmdliner fmt base64 unix))
